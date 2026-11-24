@@ -1,0 +1,445 @@
+<?php
+declare(strict_types=1);
+
+use PHPUnit\Framework\TestCase;
+use Offprint\Exporter;
+use Offprint\Fetcher;
+use Offprint\Report;
+use Offprint\Seeds;
+
+/** Stands in for WordPress: answers each public address from a table. Unknown ones are a 404. */
+final class FakeFetcher implements Fetcher
+{
+    /** @var array<string, array<string, mixed>|Throwable> */
+    public array $routes = [];
+    /** @var string[] Every address asked for, in order. */
+    public array $asked = [];
+    /** @var array<string, mixed> What any address not in the table gets, the 404 probe included. */
+    public array $missing = ['status' => 404, 'body' => '<html><body>Nothing here</body></html>'];
+
+    public function get(string $url): array|string
+    {
+        $this->asked[] = $url;
+        $route = $this->routes[$url] ?? $this->missing;
+        if ($route instanceof Throwable) {
+            throw $route;
+        }
+        if (isset($route['error'])) {
+            return $route['error'];
+        }
+        $route += ['status' => 200, 'type' => 'text/html', 'location' => '', 'encoding' => '', 'body' => ''];
+        $body = fopen('php://memory', 'w+b');
+        fwrite($body, $route['body']);
+        rewind($body);
+        return [
+            'status' => $route['status'],
+            'type' => $route['type'],
+            'location' => $route['location'],
+            'encoding' => $route['encoding'],
+            'body' => $body,
+        ];
+    }
+}
+
+final class ExporterTest extends TestCase
+{
+    private const O = 'https://blog.example.com';
+    private const SECRET = 'sekrit0123456789abcdef0123456789abcdef01';
+
+    private string $out;
+    private FakeFetcher $fetcher;
+
+    protected function setUp(): void
+    {
+        $this->out = sys_get_temp_dir() . '/exporter-test-' . bin2hex(random_bytes(6));
+        $this->fetcher = new FakeFetcher();
+    }
+
+    protected function tearDown(): void
+    {
+        if (!is_dir($this->out)) {
+            return;
+        }
+        $files = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($this->out, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::CHILD_FIRST
+        );
+        foreach ($files as $file) {
+            $file->isDir() ? rmdir($file->getPathname()) : unlink($file->getPathname());
+        }
+        rmdir($this->out);
+    }
+
+    private static function page(string $body, string $type = 'text/html'): array
+    {
+        return ['body' => $body, 'type' => $type];
+    }
+
+    private static function redirect(string $location, int $status = 301): array
+    {
+        return ['status' => $status, 'location' => $location];
+    }
+
+    /** @param array<string, array|Throwable> $routes Paths (with any query) => response. */
+    private function export(array $routes, array $seeds = ['/'], int $max_requests = 20000): Report
+    {
+        foreach ($routes as $path => $route) {
+            $this->fetcher->routes[self::O . $path] = $route;
+        }
+        $exporter = new Exporter(self::O, $this->fetcher, 'wp.local', self::SECRET, $max_requests);
+        return $exporter->run($this->out, new Seeds(array_map(fn ($p) => self::O . $p, $seeds)));
+    }
+
+    private function assertErrorContains(Report $report, string $needle): void
+    {
+        foreach ($report->errors as $error) {
+            if (str_contains($error, $needle)) {
+                $this->addToAssertionCount(1);
+                return;
+            }
+        }
+        $this->fail("No error contains \"$needle\". Errors:\n" . implode("\n", $report->errors));
+    }
+
+    public function test_the_whole_site_is_followed_and_written(): void
+    {
+        $font = "wOF2\0\x01binary";
+        $png = "\x89PNG\r\n\x1a\n\0";
+        $this->fetcher->missing['body'] = '<html><img src="/i.png">Nothing here</html>';
+        $report = $this->export([
+            '/' => self::page('<link rel="stylesheet" href="/s.css?ver=1"><a href="/a/">a</a><img src="/i.png">'
+                . '<a href="https://example.com/">away</a><a href="/wp-admin/">admin</a><a href="#top">top</a>'),
+            '/s.css?ver=1' => self::page('body{background:url(f.woff2)}', 'text/css'),
+            '/f.woff2' => self::page($font, 'font/woff2'),
+            '/a/' => self::page('<a href="/?x=1">q</a><a href="/wp-admin/">admin</a><form action="/search/" method="post"></form>'),
+            '/i.png' => self::page($png, 'image/png'),
+        ]);
+
+        $this->assertSame([], $report->errors);
+        $this->assertSame(6, $report->files);
+        $written = [
+            'index.html', 'a/index.html', 's.css', 'f.woff2', 'i.png', '404.html',
+        ];
+        $bytes = 0;
+        foreach ($written as $file) {
+            $this->assertFileExists("$this->out/$file");
+            $bytes += filesize("$this->out/$file");
+        }
+        $this->assertSame($bytes, $report->bytes);
+        $this->assertSame($font, file_get_contents("$this->out/f.woff2"));
+        $this->assertSame($png, file_get_contents("$this->out/i.png"));
+        $this->assertStringContainsString('Nothing here', (string) file_get_contents("$this->out/404.html"));
+        $this->assertSame([
+            'a form posting to ' . self::O . '/search/ is on 1 page, first seen on ' . self::O . "/a/; it won't work on the static site",
+            self::O . '/ links to ' . self::O . '/wp-admin/, which is not exported (2 pages in all).',
+            self::O . '/a/ links to ' . self::O . '/?x=1, which is not exported.',
+        ], self::sorted($report->warnings));
+        $this->assertNotContains('https://example.com/', $this->fetcher->asked);
+        $this->assertNotContains(self::O . '/wp-admin/', $this->fetcher->asked);
+        $this->assertSame(1, count(array_filter($this->fetcher->asked, fn ($u) => str_contains($u, 's.css'))));
+    }
+
+    private static function sorted(array $lines): array
+    {
+        sort($lines);
+        return $lines;
+    }
+
+    public function test_forms_are_one_warning_per_form_however_many_pages(): void
+    {
+        $search = '<form role="search" action="/"><input name="s"></form>';
+        $report = $this->export([
+            '/' => self::page("<a href=\"/a/\">a</a><a href=\"/b/\">b</a>$search"),
+            '/a/' => self::page("$search$search"),
+            '/b/' => self::page("$search<form method=\"POST\"></form>"),
+        ]);
+        $this->assertSame([
+            'a form posting to ' . self::O . '/ is on 3 pages, first seen on ' . self::O . "/; it won't work on the static site",
+            'a form posting to ' . self::O . '/b/ is on 1 page, first seen on ' . self::O . "/b/; it won't work on the static site",
+        ], $report->warnings);
+    }
+
+    public function test_a_redirect_to_the_same_file_is_another_link_to_it(): void
+    {
+        $report = $this->export([
+            '/' => self::page('<a href="/about">about</a>'),
+            '/about' => self::redirect(self::O . '/about/'),
+            '/about/' => self::page('About'),
+        ]);
+        $this->assertSame([], $report->errors);
+        $this->assertSame('About', file_get_contents("$this->out/about/index.html"));
+    }
+
+    public function test_a_redirect_to_itself_is_an_error(): void
+    {
+        $report = $this->export([
+            '/' => self::page('<a href="/x/">x</a>'),
+            '/x/' => self::redirect(self::O . '/x/'),
+        ]);
+        $this->assertErrorContains($report, self::O . '/x/ redirects to itself (linked from ' . self::O . '/)');
+        $this->assertDirectoryDoesNotExist("$this->out/x");
+    }
+
+    public function test_a_slash_loop_is_an_error_not_a_lost_page(): void
+    {
+        $report = $this->export([
+            '/' => self::page('<a href="/a">a</a>'),
+            '/a' => self::redirect(self::O . '/a/'),
+            '/a/' => self::redirect(self::O . '/a'),
+        ]);
+        $this->assertErrorContains($report, self::O . '/a redirects to ' . self::O . '/a/, which gave no page to save (linked from ' . self::O . '/)');
+        $this->assertDirectoryDoesNotExist("$this->out/a");
+    }
+
+    public function test_a_redirect_that_only_drops_the_query_is_followed(): void
+    {
+        $report = $this->export([
+            '/' => self::page('<script src="/x.js?ver=1"></script>'),
+            '/x.js?ver=1' => self::redirect(self::O . '/x.js'),
+            '/x.js' => self::page('console.log(1)', 'text/javascript'),
+        ]);
+        $this->assertSame([], $report->errors);
+        $this->assertSame('console.log(1)', file_get_contents("$this->out/x.js"));
+    }
+
+    public function test_a_followed_redirect_saves_the_page_at_both_addresses_and_counts_its_forms_once(): void
+    {
+        $after = '<p>Moved</p><form action="/s/"></form>';
+        $report = $this->export([
+            '/' => self::page('<a href="/before/">old</a>'),
+            '/before/' => self::redirect(self::O . '/after/'),
+            '/after/' => self::page($after),
+        ]);
+        $this->assertSame([], $report->errors);
+        $this->assertSame($after, file_get_contents("$this->out/before/index.html"));
+        $this->assertSame($after, file_get_contents("$this->out/after/index.html"));
+        $this->assertSame(
+            ['a form posting to ' . self::O . '/s/ is on 1 page, first seen on ' . self::O . "/after/; it won't work on the static site"],
+            $report->warnings
+        );
+    }
+
+    public function test_a_relative_location_is_resolved_against_the_address_asked_for(): void
+    {
+        $report = $this->export([
+            '/' => self::page('<a href="/dir/old/">old</a>'),
+            '/dir/old/' => self::redirect('../new/', 302),
+            '/dir/new/' => self::page('New'),
+        ]);
+        $this->assertSame([], $report->errors);
+        $this->assertSame('New', file_get_contents("$this->out/dir/old/index.html"));
+        $this->assertContains(self::O . '/dir/new/', $this->fetcher->asked);
+    }
+
+    public function test_redirect_loops_and_long_chains_stop_after_five_hops(): void
+    {
+        $routes = ['/' => self::page('<a href="/r0/">chain</a><a href="/l1/">loop</a>')];
+        for ($i = 0; $i < 8; $i++) {
+            $routes["/r$i/"] = self::redirect(self::O . '/r' . ($i + 1) . '/');
+        }
+        $routes['/l1/'] = self::redirect(self::O . '/l2/');
+        $routes['/l2/'] = self::redirect(self::O . '/l1/');
+        $report = $this->export($routes);
+        $this->assertErrorContains($report, self::O . '/r0/ redirects more than 5 times (linked from ' . self::O . '/)');
+        $this->assertErrorContains($report, self::O . '/l1/ redirects more than 5 times (linked from ' . self::O . '/)');
+        $this->assertLessThan(20, count($this->fetcher->asked));
+    }
+
+    public function test_a_redirect_to_a_refused_address_or_another_site_is_an_error(): void
+    {
+        $report = $this->export([
+            '/' => self::page('<a href="/go/">go</a><a href="/away/">away</a>'),
+            '/go/' => self::redirect(self::O . '/wp-login.php?redirect_to=x'),
+            '/away/' => self::redirect('https://example.com/'),
+        ]);
+        $this->assertErrorContains($report, self::O . '/go/ redirects to ' . self::O . '/wp-login.php?redirect_to=x, which is not exported (linked from ' . self::O . '/)');
+        $this->assertErrorContains($report, self::O . '/away/ redirects to https://example.com/, which is not exported (linked from ' . self::O . '/)');
+        $this->assertNotContains('https://example.com/', $this->fetcher->asked);
+    }
+
+    public function test_a_folder_that_redirects_to_a_file_is_a_warning_and_the_file_is_exported(): void
+    {
+        $report = $this->export([
+            '/' => self::page('<a href="/photo/">attachment page</a>'),
+            '/photo/' => self::redirect(self::O . '/wp-content/uploads/p.png'),
+            '/wp-content/uploads/p.png' => self::page('PNG', 'image/png'),
+        ]);
+        $this->assertSame([], $report->errors);
+        $this->assertSame([
+            self::O . '/photo/ redirects to the file ' . self::O . '/wp-content/uploads/p.png; links to it will not work'
+                . ' on the static site (first seen on ' . self::O . '/)',
+        ], $report->warnings);
+        $this->assertSame('PNG', file_get_contents("$this->out/wp-content/uploads/p.png"));
+        $this->assertDirectoryDoesNotExist("$this->out/photo");
+    }
+
+    public function test_an_address_with_no_file_name_is_an_error(): void
+    {
+        $report = $this->export([
+            '/' => self::page('<a href="/data/">data</a>'),
+            '/data/' => self::page('{}', 'application/json'),
+        ]);
+        $this->assertErrorContains($report, self::O . '/data/ cannot be saved: No file name for a folder with content type "application/json" (linked from ' . self::O . '/)');
+    }
+
+    public function test_a_failed_fetch_is_an_error_and_the_crawl_goes_on(): void
+    {
+        $report = $this->export([
+            '/' => self::page('<a href="/slow/">slow</a><a href="/boom/">boom</a><a href="/ok/">ok</a>'),
+            '/slow/' => ['error' => 'Operation timed out after 30000 milliseconds'],
+            '/boom/' => new RuntimeException('Something broke'),
+            '/ok/' => self::page('OK'),
+        ]);
+        $this->assertErrorContains($report, self::O . '/slow/ could not be fetched: Operation timed out after 30000 milliseconds (linked from ' . self::O . '/)');
+        $this->assertErrorContains($report, self::O . '/boom/ could not be exported: Something broke (linked from ' . self::O . '/)');
+        $this->assertSame('OK', file_get_contents("$this->out/ok/index.html"));
+    }
+
+    public function test_a_compressed_response_is_an_error(): void
+    {
+        $report = $this->export([
+            '/' => self::page('<link rel="stylesheet" href="/z.css">'),
+            '/z.css' => ['body' => "\x1f\x8b", 'type' => 'text/css', 'encoding' => 'gzip'],
+        ]);
+        $this->assertErrorContains($report, self::O . '/z.css could not be fetched: it came back compressed (Content-Encoding: gzip)');
+        $this->assertFileDoesNotExist("$this->out/z.css");
+    }
+
+    public function test_anything_but_200_is_an_error_naming_the_page_that_linked_to_it(): void
+    {
+        $report = $this->export([
+            '/' => self::page('<a href="/gone/">gone</a>'),
+            '/gone/' => ['status' => 500, 'body' => 'oops'],
+        ]);
+        $this->assertSame([self::O . '/gone/ answered 500 (linked from ' . self::O . '/).'], $report->errors);
+    }
+
+    public function test_the_request_ceiling_stops_the_crawl_with_an_error(): void
+    {
+        $links = implode('', array_map(fn ($i) => "<a href=\"/$i/\">$i</a>", range(1, 9)));
+        $report = $this->export(['/' => self::page($links)], ['/'], 4);
+        $this->assertErrorContains($report, 'Stopped at 4 requests');
+        $this->assertCount(4, $this->fetcher->asked);
+    }
+
+    public function test_two_addresses_for_one_file_is_an_error(): void
+    {
+        $report = $this->export([
+            '/' => self::page('<a href="/x/">one</a><a href="/x">two</a>'),
+            '/x/' => self::page('one'),
+            '/x' => self::page('two'),
+        ]);
+        $this->assertErrorContains($report, 'x/index.html is already written for ' . self::O . '/x/');
+        $this->assertSame('one', file_get_contents("$this->out/x/index.html"));
+    }
+
+    public function test_a_body_with_the_local_host_or_the_secret_is_an_error_that_never_prints_the_secret(): void
+    {
+        $report = $this->export([
+            '/' => self::page('<a href="/a/">a</a><a href="/b/">b</a>'),
+            '/a/' => self::page('Served from WP.LOCAL'),
+            '/b/' => self::page('header was ' . self::SECRET),
+        ]);
+        $this->assertErrorContains($report, self::O . '/a/ contains wp.local, which must never be published.');
+        $this->assertErrorContains($report, self::O . '/b/ contains the export secret, which must never be published.');
+        $this->assertStringNotContainsString(self::SECRET, implode("\n", $report->errors));
+    }
+
+    public function test_the_404_page_must_be_a_404(): void
+    {
+        $this->fetcher->missing = ['status' => 200, 'body' => 'Everything exists'];
+        $report = $this->export(['/' => self::page('Home')]);
+        $this->assertErrorContains($report, 'answered 200, not 404, so there is no 404 page.');
+        $this->assertFileDoesNotExist("$this->out/404.html");
+    }
+
+    public function test_a_site_that_redirects_everything_says_so(): void
+    {
+        // A "force HTTPS" plugin that sends every request to itself.
+        $this->fetcher->missing = ['status' => 301, 'location' => self::O . '/elsewhere/'];
+        $report = $this->export(['/' => self::redirect(self::O . '/')]);
+        $this->assertErrorContains($report, 'answered 301 (to ' . self::O . '/elsewhere/), not 404, so there is no 404 page.');
+        $this->assertErrorContains($report, self::O . '/ redirects to itself (linked from WordPress).');
+        $this->assertSame(0, $report->files);
+    }
+
+    public function test_seeds_pass_on_their_notes_and_a_refused_seed_is_an_error(): void
+    {
+        $exporter = new Exporter(self::O, $this->fetcher, 'wp.local', self::SECRET);
+        $report = $exporter->run($this->out, new Seeds(
+            [self::O . '/?p=1', self::O . '/'],
+            ['Sitemaps are off.'],
+            ['WordPress broke.']
+        ));
+        $this->assertContains('Sitemaps are off.', $report->warnings);
+        $this->assertContains('WordPress broke.', $report->errors);
+        $this->assertErrorContains($report, 'WordPress gave ' . self::O . '/?p=1 as a starting address, but the export may not fetch it.');
+    }
+
+    public function test_slugs_with_wordpress_names_are_exported_and_its_own_addresses_are_not(): void
+    {
+        $report = $this->export([
+            '/' => self::page('<a href="/wp-admin-tips/">a</a><a href="/wp-json-explained/">b</a><a href="/tag/wp-admin/">c</a>'
+                . '<a href="/tag/wp-json/">d</a><a href="/blog/wp-login.php">e</a><a href="/wp-admin/">f</a><a href="/wp-json/wp/v2/posts">g</a>'),
+            '/wp-admin-tips/' => self::page('Tips'),
+            '/wp-json-explained/' => self::page('Explained'),
+            '/tag/wp-admin/' => self::page('Tag wp-admin'),
+            '/tag/wp-json/' => self::page('Tag wp-json'),
+            '/blog/wp-login.php' => self::page('A file', 'text/plain'),
+        ]);
+        $this->assertSame([], $report->errors);
+        foreach (['wp-admin-tips/index.html', 'wp-json-explained/index.html', 'tag/wp-admin/index.html', 'tag/wp-json/index.html', 'blog/wp-login.php'] as $file) {
+            $this->assertFileExists("$this->out/$file");
+        }
+        $this->assertSame([
+            self::O . '/ links to ' . self::O . '/wp-admin/, which is not exported.',
+            self::O . '/ links to ' . self::O . '/wp-json/wp/v2/posts, which is not exported.',
+        ], self::sorted($report->warnings));
+        $this->assertNotContains(self::O . '/wp-admin/', $this->fetcher->asked);
+        $this->assertNotContains(self::O . '/wp-json/wp/v2/posts', $this->fetcher->asked);
+    }
+
+    public function test_only_the_main_feed_is_exported_and_another_feed_is_not_an_error(): void
+    {
+        $rss = '<?xml version="1.0"?><rss><channel><link>' . self::O . '/</link></channel></rss>';
+        $report = $this->export([
+            '/' => self::page('<a href="/tag/feed/">tag "feed"</a><a href="/tag/x/feed/">x</a><a href="/feed/">feed</a>'
+                . '<a href="/a/">a</a>'),
+            '/a/' => self::page('<a href="/tag/x/feed/">x</a><a href="/about/feed">comments</a>'),
+            '/tag/feed/' => self::page('Posts tagged feed'),
+            '/tag/x/feed/' => self::page($rss, 'application/rss+xml'),
+            '/about/feed' => self::redirect(self::O . '/about/feed/'),
+            '/about/feed/' => self::page($rss, 'application/atom+xml'),
+            '/feed/' => self::page($rss, 'application/rss+xml'),
+        ]);
+        $this->assertSame([], $report->errors);
+        $this->assertSame('Posts tagged feed', file_get_contents("$this->out/tag/feed/index.html"));
+        $this->assertSame($rss, file_get_contents("$this->out/feed/index.xml"));
+        $this->assertDirectoryDoesNotExist("$this->out/tag/x");
+        $this->assertDirectoryDoesNotExist("$this->out/about");
+        $this->assertSame([
+            self::O . '/ links to ' . self::O . '/tag/x/feed/, which is not exported (2 pages in all).',
+            self::O . '/a/ links to ' . self::O . '/about/feed, which is not exported.',
+        ], self::sorted($report->warnings));
+    }
+
+    public function test_a_feed_no_page_links_to_is_skipped_without_a_word(): void
+    {
+        $report = $this->export([
+            '/' => self::page('Home'),
+            '/tag/x/feed/' => self::page('<rss/>', 'application/rdf+xml'),
+        ], ['/', '/tag/x/feed/']);
+        $this->assertSame([], $report->errors);
+        $this->assertSame([], $report->warnings);
+        $this->assertDirectoryDoesNotExist("$this->out/tag");
+    }
+
+    public function test_it_refuses_a_folder_that_is_not_empty_and_fetches_nothing(): void
+    {
+        mkdir($this->out);
+        touch("$this->out/left-over.html");
+        $report = $this->export(['/' => self::page('Home')]);
+        $this->assertErrorContains($report, 'is not empty');
+        $this->assertSame([], $this->fetcher->asked);
+    }
+}

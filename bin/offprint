@@ -1,0 +1,172 @@
+#!/bin/bash
+# Offprint: the one command. Run it from inside a site folder (one holding site.json, or below one), or set
+# OFFPRINT_SITE to the site folder; but offprint new, which makes one, outside every site folder. Each command runs the
+# script of the same job in this folder (or, for the macOS set-up and agent, in os/darwin/), which also runs by itself.
+# Needs bash 3.2 (macOS) or newer.
+set -u
+
+usage() {
+  cat <<'USAGE'
+usage: offprint COMMAND [ARGS...]
+  offprint new NAME [--public-url URL]       make a new site folder, NAME, here: its site.json (with addresses and
+                                             ports no other site set up on this Mac uses) and .gitignore, committed
+  offprint publish [--dry-run] [--no-push]   export the site, check it, commit it with a backup, push it, and have
+                                             its host adapter make it live
+  offprint agent                             what launchd runs when WordPress asks for a publish
+  offprint wp ARGS...                        WP-CLI in the site's WordPress (offprint wp option get home)
+  offprint compose ARGS...                   docker compose for the site (offprint compose up -d)
+  offprint setup-wp                          make the site's local WordPress
+  offprint install-agent [--force] [--remove | --print]
+                                             the launchd agent that publishes when WordPress asks (yours, not root's)
+  offprint host-setup [--print] [--adopt]    give the site its addresses, name and ports 443/80 on this Mac (as root:
+                                             it prints the sudo line to run; --print shows every change, as you;
+                                             --adopt: the same site, moved to a new folder, takes its set-up over)
+  offprint host-undo [--print]               take this site's host set-up away again, and nothing else
+  offprint check DIR                         run the export checks on DIR, as a publish runs them (the site's hosts,
+                                             and its adapter's file names and limits)
+  offprint adapter setup [--yes]             set up on this Mac what the site's host adapter needs (each step says
+                                             what it will do, and asks first; --yes: yes to each)
+  offprint adapter doctor                    check what the site's host adapter needs, and the live site: one ok or
+                                             problem line each, changing nothing (exit 0 only when all are ok)
+  offprint help                              this list
+USAGE
+}
+
+# shq STRING: STRING in single quotes, for a line to paste into a shell (each ' in it becomes '\'').
+shq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+# This file's own folder, even when it is run through a symlink (one in a folder on PATH, say), or a chain of them:
+# each link is followed by hand, since readlink's -f flag is missing from older macOS. The chain can't loop: the
+# system has just followed it to start this file. Nothing here is looked up on the PATH, which isn't clean yet (see
+# lib/site.sh, sourced just after): the shell's own builtins, and readlink (which bash lacks) by its absolute path,
+# never one found on the PATH (. on it, run from wp-content/, could find WordPress's). (stdin /dev/null: see "adapter"
+# below.)
+READLINK=/usr/bin/readlink; [ -x "$READLINK" ] || READLINK=/bin/readlink
+self="$0"
+while [ -L "$self" ]; do
+  link="$("$READLINK" -- "$self" < /dev/null)" || { echo "offprint: can't read the link $self" >&2; exit 2; }
+  case "$link" in
+    /*) self="$link" ;;
+    *) case "$self" in */*) self="${self%/*}/$link" ;; *) self="./$link" ;; esac ;;
+  esac
+done
+case "$self" in */*) BIN="${self%/*}" ;; *) BIN=. ;; esac
+BIN="$(CDPATH= cd -P -- "${BIN:-/}" && pwd -P)" || { echo "offprint: can't find its own folder" >&2; exit 2; }
+# The PATH made safe (lib/site.sh) before anything else runs; every script below is run by /bin/bash, by its path.
+. "$BIN/../lib/site.sh" || exit 2
+
+if [ $# -eq 0 ]; then usage; exit 0; fi
+cmd="$1"; shift
+case "$cmd" in
+  help | -h | --help) usage; exit 0 ;;
+  new) exec /bin/bash "$BIN/new" "$@" ;;
+  publish) exec /bin/bash "$BIN/publish" "$@" ;;
+  agent) exec /bin/bash "$BIN/publish-agent" "$@" ;;
+  wp) exec /bin/bash "$BIN/wp" "$@" ;;
+  setup-wp) exec /bin/bash "$BIN/setup-wp" "$@" ;;
+  install-agent) exec /bin/bash "$BIN/../os/darwin/install-agent" "$@" ;;
+  host-setup | host-undo)
+    # The site is the one this runs in (or OFFPRINT_SITE). Changing the Mac needs root, so without --print this only
+    # says how to run the script with sudo: it is the one place Offprint runs as root, and the owner runs it by hand.
+    # --adopt (host-setup only) passes through: see os/darwin/host-setup.sh.
+    print=0; adopt=""
+    for arg in "$@"; do
+      case "$arg" in
+        --print) print=1 ;;
+        --adopt) [ "$cmd" = host-setup ] || { echo "usage: offprint $cmd [--print]" >&2; exit 2; }; adopt=--adopt ;;
+        *) if [ "$cmd" = host-setup ]; then echo "usage: offprint $cmd [--print] [--adopt]" >&2; else echo "usage: offprint $cmd [--print]" >&2; fi
+           exit 2 ;;
+      esac
+    done
+    offprint_find_site
+    offprint_load_site
+    if [ "$print" = 1 ]; then exec /bin/bash "$TOOL/os/darwin/$cmd.sh" --print ${adopt:+"$adopt"} "$SITE"; fi
+    if [ "$(id -u)" = 0 ]; then exec /bin/bash "$TOOL/os/darwin/$cmd.sh" ${adopt:+"$adopt"} "$SITE"; fi
+    echo "offprint $cmd changes lo0, /etc/hosts and /Library/LaunchDaemons, so it runs as root. Run:"
+    echo "  sudo /bin/bash $(shq "$TOOL/os/darwin/$cmd.sh")${adopt:+ $adopt} $(shq "$SITE")"
+    echo "(To see first what it would do: offprint $cmd --print${adopt:+ $adopt})"
+    exit 1
+    ;;
+  compose)
+    offprint_find_site
+    offprint_load_site
+    cd "$SITE" || exit 2
+    dc "$@"
+    exit $?
+    ;;
+  check)
+    # DIR is the caller's (relative to where this runs), so no cd to the site here. The check is the publish's own: the
+    # site's hosts, and from its adapter the names only the publish writes at the root (the adapter's own files and its
+    # host's), those its host gives a meaning of its own there, and its limits. None of those files may be in DIR, but
+    # for the adapter's own in the site's own site/, where a publish wrote them.
+    . "$BIN/../lib/adapter.sh"
+    offprint_find_site
+    offprint_load_site
+    # The adapter's private folder (lib/adapter.sh) goes on every exit, and before the check runs (exec runs no trap); a
+    # load still running is stopped first, as every command stops one (offprint_adapter_stop: a TERM, then it and all
+    # under it killed).
+    check_cleanup() { offprint_adapter_stop; offprint_adapter_cleanup; }
+    trap check_cleanup EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    offprint_adapter_load || { echo "$OFFPRINT_ADAPTER_PROBLEM" >&2; exit 2; }
+    allowed=""
+    if [ -n "${1:-}" ] && [ -d "$1" ] && [ "$1" -ef "$SITE/site" ]; then allowed="$ADAPTER_PREPARE_FILES"; fi
+    check_cleanup; trap - EXIT
+    # (The file the publish still writes after its check, and its size, are the publish's alone to give: never taken
+    # from the caller's environment.)
+    CHECK_SITE_TO_COME= CHECK_SITE_TO_COME_BYTES= \
+      CHECK_SITE_HOST="$SITE_PUBLIC_HOST" CHECK_SITE_LOCAL_HOST="$SITE_LOCAL_HOST" \
+      CHECK_SITE_RESERVED="$ADAPTER_PREPARE_FILES $ADAPTER_HOST_FILES" CHECK_SITE_ALLOWED="$allowed" \
+      CHECK_SITE_SPECIAL="$ADAPTER_HOST_SPECIAL_FILES" \
+      CHECK_SITE_MAX_BYTES="$ADAPTER_MAX_TOTAL_BYTES" CHECK_SITE_MAX_FILES="$ADAPTER_MAX_FILES" \
+      CHECK_SITE_MAX_FILE_BYTES="$ADAPTER_MAX_FILE_BYTES" \
+      exec /bin/bash "$BIN/check-site" "$@"
+    ;;
+  adapter)
+    # The site's host adapter's own set-up and check (lib/adapter.sh: adapter_setup, adapter_doctor), after its settings
+    # are checked as a publish checks them. setup is for a person at a terminal: its stdin is this command's.
+    sub="${1:-}"; [ $# -eq 0 ] || shift
+    case "$sub" in
+      setup) for arg in "$@"; do [ "$arg" = --yes ] || { echo "usage: offprint adapter setup [--yes]" >&2; exit 2; }; done ;;
+      doctor) [ $# -eq 0 ] || { echo "usage: offprint adapter doctor" >&2; exit 2; } ;;
+      *) echo "usage: offprint adapter setup [--yes] | offprint adapter doctor" >&2; exit 2 ;;
+    esac
+    # Everything up to the adapter's own function runs with stdin /dev/null (bash keeps the real one aside, close-on-exec,
+    # meanwhile): set-up's stdin may be the token, piped in, and no program started before set-up reads it (lib/site.sh's
+    # mktemp and php, the load's find, cat and chmod, ...) is handed it. So is the clean-up on the way out. (lib/site.sh's
+    # top level, sourced above, runs no program.)
+    {
+      . "$BIN/../lib/adapter.sh"
+      offprint_find_site
+      offprint_load_site
+      # The adapter's functions run in a shell of their own, which ignores INT: so Ctrl-C (an INT) here, or a TERM, stops
+      # it with a TERM, letting it tidy up first (offprint_adapter_stop); a second Ctrl-C doesn't cut that short. The
+      # adapter's private folder goes on every exit. (Not named adapter_...: the load removes every such function here.)
+      stop_adapter_command() { trap '' INT TERM; { offprint_adapter_stop; offprint_adapter_cleanup; } < /dev/null; }
+      trap stop_adapter_command EXIT
+      trap 'exit 130' INT
+      trap 'exit 143' TERM
+      offprint_adapter_load || { echo "$OFFPRINT_ADAPTER_PROBLEM" >&2; exit 2; }
+      vrc=0; offprint_adapter_call adapter_validate > "$OFFPRINT_ADAPTER_TMP/validate.out" 2>&1 < /dev/null || vrc=$?
+      if [ "$OFFPRINT_ADAPTER_ENDED" != returned ] || [ "$vrc" -ne 0 ]; then
+        head -c 65536 "$OFFPRINT_ADAPTER_TMP/validate.out" 2>/dev/null | LC_ALL=C tr '\001-\011\013-\037\177' '?' >&2
+        if [ "$OFFPRINT_ADAPTER_ENDED" != returned ]; then
+          echo "The adapter's settings couldn't be checked: its adapter_validate ended without returning (an exit, or an error)." >&2
+        fi
+        echo "Fix site.json, then run offprint adapter $sub again." >&2
+        exit 2
+      fi
+      rm -f "$OFFPRINT_ADAPTER_TMP/validate.out"
+    } < /dev/null
+    rc=0
+    if [ "$sub" = setup ]; then offprint_adapter_call adapter_setup "$@" || rc=$?
+    else offprint_adapter_call adapter_doctor < /dev/null || rc=$?; fi
+    exit "$rc"
+    ;;
+  *)
+    echo "offprint: unknown command '$cmd'" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

@@ -1,0 +1,6 @@
+.DS_Store
+# The tool's own. A site's list is templates/site.gitignore.
+/vendor/
+/.phpunit.result.cache
+# the tool repo's own working notes, never committed
+/.superpowers/

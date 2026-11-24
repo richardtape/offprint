@@ -1,0 +1,145 @@
+#!/bin/bash
+# Installs, or removes, the launchd agent that publishes a site when its WordPress asks: a LaunchAgent in your own
+# account (never a LaunchDaemon, never as root), labelled with site.json's agent_label. launchd starts the tool's
+# bin/publish-agent, with OFFPRINT_SITE set to the site folder, whenever something changes in the site's var/inbox,
+# and every five minutes anyway (for a request still waiting, or a change it missed); that runs bin/publish.
+# var/inbox is the one folder of var/ that WordPress can write to (templates/compose.yaml mounts it at
+# /var/www/publish-inbox).
+#   offprint install-agent [--force]            write ~/Library/LaunchAgents/LABEL.plist and load it
+#   offprint install-agent --remove [--force]   unload it and delete the plist
+#   offprint install-agent --print              print the plist it would write, and change nothing
+# Run it from inside the site folder, or with OFFPRINT_SITE set to it. (This file also runs by itself, the same way.)
+# Unloading the agent stops a publish it is running, so while var/publish.lock exists this refuses to, unless --force.
+# A plist with this label that is another site folder's agent (its OFFPRINT_SITE, or else its WorkingDirectory, names
+# another folder) is never replaced or removed, unless --force.
+# The agent's PATH is Homebrew's (Apple silicon, then Intel) and the system's, unless INSTALL_AGENT_PATH
+# says otherwise; docker, git and php must be on it.
+# Needs bash 3.2 (macOS) or newer.
+set -euo pipefail
+# lib/site.sh first, found by the shell's own builtins: it makes the PATH safe to use before anything is looked up on it.
+case "${BASH_SOURCE[0]}" in */*) here="${BASH_SOURCE[0]%/*}" ;; *) here=. ;; esac
+. "$here/../../lib/site.sh" || exit 2
+AGENT_PATH="${INSTALL_AGENT_PATH:-/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin}"
+
+usage() { echo "usage: offprint install-agent [--force] [--remove | --print]" >&2; exit 2; }
+mode=install; force=0
+for arg in "$@"; do
+  case "$arg" in
+    --force) force=1 ;;
+    --remove | --print) [ "$mode" = install ] || usage; mode="${arg#--}" ;;
+    *) usage ;;
+  esac
+done
+
+uid="$(id -u)"
+if [ "$uid" = 0 ]; then
+  echo "Run offprint install-agent as yourself, not with sudo: the agent belongs in your own account." >&2
+  exit 1
+fi
+
+offprint_find_site
+offprint_load_site
+LABEL="$SITE_AGENT_LABEL"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+
+# Paths go into XML.
+xml() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+
+# WatchPaths is the inbox folder, not the request file: the file is moved away and written again each time,
+# the folder stays. StartInterval starts the agent every five minutes anyway; with nothing waiting it exits
+# at once. ThrottleInterval is launchd's default, written down because bin/publish-agent stays a little
+# longer than that (so a request written just after a run is taken by that run's agent).
+plist() {
+  cat <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$(xml "$LABEL")</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/bash</string><string>$(xml "$TOOL/bin/publish-agent")</string></array>
+  <key>WorkingDirectory</key><string>$(xml "$SITE")</string>
+  <key>WatchPaths</key>
+  <array><string>$(xml "$SITE/var/inbox")</string></array>
+  <key>StartInterval</key><integer>300</integer>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>$(xml "$AGENT_PATH")</string>
+    <key>OFFPRINT_SITE</key><string>$(xml "$SITE")</string>
+  </dict>
+  <key>StandardOutPath</key><string>$(xml "$SITE/var/publish.log")</string>
+  <key>StandardErrorPath</key><string>$(xml "$SITE/var/publish.log")</string>
+  <key>RunAtLoad</key><false/>
+  <key>ThrottleInterval</key><integer>10</integer>
+</dict>
+</plist>
+PLIST
+}
+
+if [ "$mode" = print ]; then
+  plist
+  exit 0
+fi
+if [ -d "$SITE/var/publish.lock" ] && [ "$force" = 0 ]; then
+  echo "A publish is running (var/publish.lock), and unloading the agent would stop it." >&2
+  echo "Wait for it to finish, or run this again with --force." >&2
+  exit 1
+fi
+command -v plutil >/dev/null 2>&1 || { echo "plutil isn't here: offprint install-agent is for macOS." >&2; exit 1; }
+
+# A plist with this label already: whose agent is it? Its OFFPRINT_SITE says, or (one from before that) its
+# WorkingDirectory. Another site folder's is left alone, unless --force.
+if { [ -e "$PLIST" ] || [ -L "$PLIST" ]; } && [ "$force" = 0 ]; then
+  owner="$(plutil -extract EnvironmentVariables.OFFPRINT_SITE raw -o - "$PLIST" 2>/dev/null \
+    || plutil -extract WorkingDirectory raw -o - "$PLIST" 2>/dev/null || true)"
+  if [ "$owner" != "$SITE" ] && ! { [ -n "$owner" ] && [ -d "$owner" ] && [ "$owner" -ef "$SITE" ]; }; then
+    echo "$PLIST is the agent of another site folder, ${owner:-(it names none)}, not of this one, $SITE: both have the label $LABEL." >&2
+    echo "Give this site an agent_label of its own in site.json, or run this again with --force to take the label over." >&2
+    exit 1
+  fi
+fi
+
+case "$mode" in
+  remove)
+    if launchctl bootout "gui/$uid/$LABEL" 2>/dev/null; then echo "Unloaded $LABEL."; else echo "$LABEL wasn't loaded."; fi
+    rm -f "$PLIST"
+    echo "Removed $PLIST."
+    exit 0
+    ;;
+esac
+
+missing=""
+for tool in docker git php; do
+  # A subshell, so the PATH (and the command hash it clears) is the agent's only for this lookup.
+  ( PATH="$AGENT_PATH"; command -v "$tool" ) >/dev/null 2>&1 || missing="${missing:+$missing }$tool"
+done
+if [ -n "$missing" ]; then
+  echo "Not installed: can't find $missing on the agent's PATH ($AGENT_PATH); bin/publish needs docker, git and php." >&2
+  echo "Install them there, or run again with INSTALL_AGENT_PATH set to a PATH that has all three." >&2
+  exit 1
+fi
+
+if [ -L "$SITE/var/inbox" ] || { [ -e "$SITE/var/inbox" ] && [ ! -d "$SITE/var/inbox" ]; }; then
+  echo "Not installed: var/inbox is a symlink or not a folder; remove it, and run this again." >&2
+  exit 1
+fi
+mkdir -p "$SITE/var/inbox" "$(dirname "$PLIST")"
+tmp="$(mktemp "${TMPDIR:-/tmp}/$LABEL.XXXXXX")"
+trap 'rm -f "$tmp"' EXIT
+plist > "$tmp"
+plutil -lint "$tmp" >/dev/null || { echo "The plist didn't pass plutil -lint; nothing was installed." >&2; exit 1; }
+chmod 644 "$tmp"
+mv -f "$tmp" "$PLIST"
+
+# An earlier copy first (it may watch another path). launchctl can refuse a bootstrap made straight after.
+launchctl bootout "gui/$uid/$LABEL" 2>/dev/null && sleep 1 || true
+# A label once disabled (by bootout, or in System Settings) stays disabled until enabled again.
+launchctl enable "gui/$uid/$LABEL"
+if ! launchctl bootstrap "gui/$uid" "$PLIST"; then
+  echo "launchctl couldn't load $LABEL; the plist is in place at $PLIST." >&2
+  echo "Run offprint install-agent again in a few seconds. If it still fails, look in System Settings > General >" >&2
+  echo "Login Items & Extensions, and switch it on under Allow in the Background (it may be listed as bash)." >&2
+  exit 1
+fi
+echo "Installed and loaded $LABEL ($PLIST)."
+echo "It runs offprint publish for $SITE whenever WordPress writes var/inbox/publish-request. Its log is var/publish.log."

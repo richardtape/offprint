@@ -1,0 +1,96 @@
+name: CI
+
+# Checks on every push to any branch and on pull requests.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# Three jobs, run side by side: the two long suites each have one of their own, everything else shares the third. In each
+# job every test file is its own step, and each runs even when one before it failed, so one failure never hides
+# another's result; the job fails if any of them did. (On ubuntu-latest, the publish suite took about 2.5 minutes, the
+# adapter suite about 6.5 and the rest together about 2.5: each timeout leaves room without letting a hang run long.)
+jobs:
+  publish:
+    name: bin/publish tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: bin/publish tests
+        if: ${{ !cancelled() }}
+        run: bash tests/publish.test.sh
+
+  adapter:
+    name: host adapter tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: host adapter tests
+        if: ${{ !cancelled() }}
+        run: bash tests/adapter.test.sh
+
+  checks:
+    name: Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: JavaScript tests
+        if: ${{ !cancelled() }}
+        run: |
+          # Only this repo's own tests in tests/. The admin bar has a Node suite: if it has gone, that is a failure,
+          # never a quiet pass.
+          if [ -z "$(find tests -name '*.test.js' -print -quit)" ]; then
+            echo "No JavaScript tests found in tests/ (tests/admin-bar.test.js is expected)." >&2
+            exit 1
+          fi
+          find tests -name '*.test.js' -print0 | xargs -0 node --test
+
+      # PHP and composer come preinstalled on ubuntu-latest runners, so no third-party
+      # setup action is needed. phpunit.xml looks only in tests/php.
+      - name: PHP tests
+        if: ${{ !cancelled() }}
+        run: |
+          php -v
+          composer install --no-interaction --no-progress
+          vendor/bin/phpunit
+
+      - name: bin/check-site tests
+        if: ${{ !cancelled() }}
+        run: bash tests/check-site.test.sh
+
+      - name: offprint new tests
+        if: ${{ !cancelled() }}
+        run: bash tests/new.test.sh
+
+      - name: os/darwin/secret tests
+        if: ${{ !cancelled() }}
+        run: bash tests/secret.test.sh
+
+      - name: bin/publish-agent and install-agent tests
+        if: ${{ !cancelled() }}
+        run: bash tests/agent.test.sh
+
+      - name: hosts-block tests
+        if: ${{ !cancelled() }}
+        run: bash tests/hosts-block.test.sh
+
+      - name: host-setup and host-undo tests
+        if: ${{ !cancelled() }}
+        run: bash tests/host.test.sh
+
+      - name: names tests
+        if: ${{ !cancelled() }}
+        run: bash tests/names.test.sh
+
+      - name: site.json loader tests
+        if: ${{ !cancelled() }}
+        run: bash tests/config.test.sh

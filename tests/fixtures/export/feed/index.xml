@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"
+	xmlns:content="http://purl.org/rss/1.0/modules/content/"
+	xmlns:wfw="http://wellformedweb.org/CommentAPI/"
+	xmlns:dc="http://purl.org/dc/elements/1.1/"
+	xmlns:atom="http://www.w3.org/2005/Atom"
+	xmlns:sy="http://purl.org/rss/1.0/modules/syndication/"
+	xmlns:slash="http://purl.org/rss/1.0/modules/slash/"
+	>
+
+<channel>
+	<title>Example</title>
+	<atom:link href="https://www.example.com/feed/" rel="self" type="application/rss+xml" />
+	<link>https://www.example.com/</link>
+	<description>A made-up site for the tests</description>
+	<lastBuildDate>Fri, 20 Nov 2026 10:00:00 +0000</lastBuildDate>
+	<language>en-US</language>
+	<sy:updatePeriod>
+	hourly	</sy:updatePeriod>
+	<sy:updateFrequency>
+	1	</sy:updateFrequency>
+	<generator>https://wordpress.org/?v=6.9</generator>
+	<item>
+		<title>Hello static</title>
+		<link>https://www.example.com/hello-static/</link>
+		<comments>https://www.example.com/hello-static/#respond</comments>
+		<dc:creator><![CDATA[editor]]></dc:creator>
+		<pubDate>Fri, 20 Nov 2026 10:00:00 +0000</pubDate>
+		<category><![CDATA[Notes]]></category>
+		<guid isPermaLink="false">https://www.example.com/?p=5</guid>
+		<description><![CDATA[A made-up post with a link, an image and some code. Read more: Hello static]]></description>
+		<content:encoded><![CDATA[<p>A made-up post with <a href="https://www.example.com/about/">a link</a>, an image and some code.</p>
+<figure class="wp-block-image size-large"><img decoding="async" src="https://www.example.com/wp-content/uploads/2026/11/photo-1024x683.jpg" alt="" class="wp-image-7" srcset="https://www.example.com/wp-content/uploads/2026/11/photo-1024x683.jpg 1024w, https://www.example.com/wp-content/uploads/2026/11/photo-300x200.jpg 300w" sizes="(max-width: 1024px) 100vw, 1024px" /></figure>
+<pre class="wp-block-code"><code>curl https://www.example.com/wp-json/ and /wp-admin/ are only words here</code></pre>
+]]></content:encoded>
+		<wfw:commentRss>https://www.example.com/hello-static/feed/</wfw:commentRss>
+		<slash:comments>0</slash:comments>
+	</item>
+	<item>
+		<title>About</title>
+		<link>https://www.example.com/about/</link>
+		<dc:creator><![CDATA[editor]]></dc:creator>
+		<pubDate>Thu, 19 Nov 2026 09:30:00 +0000</pubDate>
+		<category><![CDATA[Uncategorized]]></category>
+		<guid isPermaLink="false">https://www.example.com/?p=3</guid>
+		<description><![CDATA[Who writes here.]]></description>
+		<content:encoded><![CDATA[<p>Who writes here, and <a href="https://example.org/elsewhere/">a link to another site</a>.</p>
+]]></content:encoded>
+	</item>
+</channel>
+</rss>

@@ -1,0 +1,297 @@
+#!/bin/bash
+# offprint new NAME [--public-url URL]: makes a new site folder, ./NAME, in the folder this runs in: a git repository on
+# main holding site.json and .gitignore (templates/site.gitignore), committed as "A new site"; then says what it picked
+# and the commands that are left (README.md, "Try it"). It changes nothing else: no other site is read, nothing on the
+# Mac is set up, nothing is written outside the folder it runs in.
+#
+# What it writes, and how:
+#   name                  NAME, held to site.json's rule; refused when Docker has a compose project of that name, or
+#                         a volume compose would mount for one (NAME_db, NAME_wordpress): that project isn't this site's.
+#   public_url            --public-url URL, or asked for on the terminal; held to site.json's rule by lib/config.php.
+#   local_host            NAME.local; refused when the hosts file names it already.
+#   local_ip4             127.0.0.N, the lowest N from 2 to 254 that is neither on lo0 nor in the hosts file, and whose
+#                         two ports (below) nothing listens on.
+#   local_ip6             fdXX:XXXX:XXXX::N: a unique-local prefix of 40 random bits, made for this site, and the same N
+#                         (written in the same digits as in local_ip4).
+#   tls_port, http_port   4000 + 100 * N + 43, and + 80.
+# When Docker, lo0, the hosts file or lsof can't be asked, it says so in one line and goes on: setup-wp checks the compose
+# project again, and host-setup every address, name and port, before either changes anything.
+#
+# Refusals (exit 2) come before anything is made. The folder is made under a private name beside ./NAME
+# (.NAME.new.XXXXXX), checked with lib/config.php, committed, and only then renamed to ./NAME; on any failure (exit 1),
+# a refusal of what lib/config.php found (exit 2), or a signal (INT 130, TERM 143, HUP 129), it is removed.
+#
+# Test seams (tests/new.test.sh): OFFPRINT_HOSTS_FILE, OFFPRINT_IFCONFIG and OFFPRINT_LSOF, as host-setup's, only read
+# here; OFFPRINT_NEW_PREFIX, the 40 bits as 10 lowercase hex digits (several, separated by spaces, are drawn in turn);
+# OFFPRINT_NEW_ASSUME_TTY=1, to ask for the public address though stdin isn't a terminal.
+# Needs bash 3.2 (macOS) or newer.
+set -u
+# git finds the repository from the folder it is run in, and only from there: these variables would send it elsewhere
+# (git exports GIT_DIR inside any hook), and the ceiling would hide a repository this runs inside.
+unset GIT_DIR GIT_WORK_TREE GIT_IMPLICIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_PREFIX GIT_GRAFT_FILE GIT_SHALLOW_FILE GIT_CEILING_DIRECTORIES
+# lib/site.sh first, found by the shell's own builtins: it makes the PATH safe to use before anything is looked up on it.
+# (No site is found or loaded: this runs outside every site folder.)
+case "${BASH_SOURCE[0]}" in */*) here="${BASH_SOURCE[0]%/*}" ;; *) here=. ;; esac
+. "$here/../lib/site.sh" || exit 2
+
+usage() { echo "usage: offprint new NAME [--public-url URL]"; }
+# refuse WHY: one line, exit 2. failed WHY: one line, exit 1. warn WHY: one line, and go on. (All on stderr.)
+refuse() { echo "offprint new: $*" >&2; exit 2; }
+failed() { echo "offprint new: $*" >&2; exit 1; }
+warn() { echo "offprint new: $*" >&2; }
+# first_line TEXT: its first line, control characters shown as ?, at most 200 characters (for what a program said)
+first_line() { printf '%s\n' "$1" | head -n 1 | LC_ALL=C tr '\001-\011\013-\037\177' '?' | cut -c1-200; }
+
+name=""; have_name=0; url=""; have_url=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h | --help) usage; exit 0 ;;
+    --public-url) [ $# -ge 2 ] && [ "$have_url" = 0 ] || { usage >&2; exit 2; }; url="$2"; have_url=1; shift 2 ;;
+    --public-url=*) [ "$have_url" = 0 ] || { usage >&2; exit 2; }; url="${1#--public-url=}"; have_url=1; shift ;;
+    -*) usage >&2; exit 2 ;;
+    *) [ "$have_name" = 0 ] || { usage >&2; exit 2; }; name="$1"; have_name=1; shift ;;
+  esac
+done
+[ "$have_name" = 1 ] || { usage >&2; exit 2; }
+
+# --- refusals, before anything is made ---
+# The name: site.json's rule (lib/config.php), checked here first, as it names a folder; the letters are listed, so no
+# locale can widen them.
+shown_name="$(_offprint_shown "$name")"
+ok_name=1
+case "$name" in [abcdefghijklmnopqrstuvwxyz]*) ;; *) ok_name=0 ;; esac
+case "$name" in *[!abcdefghijklmnopqrstuvwxyz0123456789-]*) ok_name=0 ;; esac
+[ "${#name}" -le 31 ] || ok_name=0
+[ "$ok_name" = 1 ] || refuse "the name '$shown_name' won't do: it must be lowercase letters, digits and dashes, starting with a letter, at most 31 characters (it is the site's Docker compose project name)."
+[ "$name" != offprint-e2e ] || refuse "the name offprint-e2e is the tests' own compose project; choose another."
+# (site.json's rule allows a dash at the end; a host name's label doesn't, and local_host is made from the name)
+case "$name" in *-) refuse "the name '$name' won't do: it ends with a dash, so $name.local can't be its local host name." ;; esac
+
+if ! cwd="$(_offprint_on_disk .)" || ! cwd="${cwd%?x}" || [ -z "$cwd" ]; then
+  refuse "can't tell which folder this is (has it been deleted?); nothing was made."
+fi
+shown_cwd="$(_offprint_shown "$cwd")"
+if [ -e "$cwd/$name" ] || [ -L "$cwd/$name" ]; then
+  refuse "./$name already exists here; nothing was made. Choose another name, or run this in another folder."
+fi
+# Not in a site folder, nor below one (anything called site.json, at or above, as lib/site.sh looks), nor in a git
+# repository: the new folder is a site, and a repository, of its own.
+outer="$(_offprint_outermost_site "$cwd")"
+[ -z "$outer" ] || refuse "this folder is inside the site folder $(_offprint_shown "$outer") (it holds site.json); run this outside every site folder."
+d="$cwd"
+while :; do
+  if [ -e "$d/.git" ] || [ -L "$d/.git" ]; then
+    refuse "this folder is inside the git repository $(_offprint_shown "$d"); run this outside it, as the site folder is a repository of its own."
+  fi
+  [ "$d" != / ] || break
+  d="${d%/*}"; [ -n "$d" ] || d=/
+done
+command -v git > /dev/null 2>&1 || refuse "git isn't on the PATH, and the site folder is a git repository; install git, then run this again."
+command -v php > /dev/null 2>&1 || refuse "php isn't on the PATH, and site.json is checked with php (lib/config.php); install php, then run this again."
+# (git's own answer as well: a bare repository, say, has no .git.)
+if GIT_DISCOVERY_ACROSS_FILESYSTEM=1 git rev-parse --git-dir > /dev/null 2>&1 < /dev/null; then
+  refuse "this folder is inside a git repository; run this outside it, as the site folder is a repository of its own."
+fi
+
+# Docker: a compose project of the name, or a volume compose would mount for it, is another's (lib/site.sh refuses it too,
+# before any compose command; this says so before anything is made).
+docker_unchecked="so it couldn't be checked that Docker has no compose project or volume called $name; offprint setup-wp checks again before it starts anything."
+if ! command -v docker > /dev/null 2>&1; then
+  warn "docker isn't on the PATH, $docker_unchecked"
+elif ! said="$(docker compose ls -a -q 2>&1 < /dev/null)"; then
+  warn "Docker couldn't be asked (docker said: $(first_line "$said")), $docker_unchecked"
+else
+  if printf '%s\n' "$said" | grep -qxF -- "$name"; then
+    refuse "Docker has a compose project called $name already; choose another name (its containers would be taken for this site's)."
+  fi
+  if ! said="$(docker volume ls -q 2>&1 < /dev/null)"; then
+    warn "Docker couldn't be asked (docker said: $(first_line "$said")), $docker_unchecked"
+  else
+    for v in $OFFPRINT_VOLUMES; do
+      if printf '%s\n' "$said" | grep -qxF -- "${name}_$v"; then
+        refuse "Docker has a volume called ${name}_$v already, which compose would mount for a project called $name; choose another name."
+      fi
+    done
+  fi
+fi
+
+# The hosts file: read once, for the name now and the addresses below. A line's comment, and a CR at its end, are not
+# part of it; names are compared without case, as the resolver compares them.
+local_host="$name.local"
+HOSTS="${OFFPRINT_HOSTS_FILE:-/etc/hosts}"
+if ! hosts_text="$(cat -- "$HOSTS" 2>&1 < /dev/null)"; then
+  warn "couldn't read $(_offprint_shown "$HOSTS") ($(first_line "$hosts_text")), so it couldn't be checked whether it names $local_host or which addresses it gives; offprint host-setup --print checks again."
+  hosts_text=""
+fi
+# hosts_awk PROGRAM [ARGS...]: PROGRAM run on the hosts file's lines, each without its comment and its CR.
+hosts_awk() { local p="$1"; shift; printf '%s\n' "$hosts_text" | awk "$@" '{ sub(/\r$/, ""); sub(/#.*/, "") } '"$p"; }
+line="$(hosts_awk '{ for (i = 2; i <= NF; i++) if (tolower($i) == h) { print NR; exit } }' -v h="$local_host")"
+[ -z "$line" ] || refuse "$(_offprint_shown "$HOSTS") names $local_host already (line $line); choose another name, or take that line out first."
+
+# --- the public address: given, or asked for on the terminal ---
+if [ "$have_url" = 0 ]; then
+  if [ ! -t 0 ] && [ "${OFFPRINT_NEW_ASSUME_TTY:-}" != 1 ]; then
+    usage >&2
+    refuse "give the public address with --public-url URL (stdin isn't a terminal, so it can't be asked for); nothing was made."
+  fi
+  printf '%s' "The site's public address, where it will be served (https://..., no path): " >&2
+  IFS= read -r url || true
+  # (spaces, tabs and a CR around a pasted answer are not part of it)
+  tab="$(printf '\t')"; cr="$(printf '\r')"
+  while :; do
+    case "$url" in
+      " "* | "$tab"* | "$cr"*) url="${url#?}" ;;
+      *" " | *"$tab" | *"$cr") url="${url%?}" ;;
+      *) break ;;
+    esac
+  done
+  [ -n "$url" ] || refuse "no public address was given; nothing was made."
+fi
+
+# --- the address and ports ---
+# which_program SEAM ABSOLUTE NAME: SEAM when it is set (a test's), else ABSOLUTE where it is (the one host-setup runs,
+# os/darwin/host-lib.sh), else NAME, looked up on the PATH (Linux keeps them elsewhere).
+which_program() { if [ -n "$1" ]; then printf '%s' "$1"; elif [ -x "$2" ]; then printf '%s' "$2"; else printf '%s' "$3"; fi; }
+used4=""   # the addresses lo0 and the hosts file have, one a line
+IFCONFIG="$(which_program "${OFFPRINT_IFCONFIG:-}" /sbin/ifconfig ifconfig)"
+if lo0="$("$IFCONFIG" lo0 2>&1 < /dev/null)"; then
+  used4="$(printf '%s\n' "$lo0" | awk '$1 == "inet" { print $2 }')"
+else
+  warn "couldn't read lo0 ($(first_line "$lo0")), so the address picked may be on it already; offprint host-setup --print checks again."
+fi
+used4="$used4
+$(hosts_awk 'NF { print $1 }')"
+LSOF="$(which_program "${OFFPRINT_LSOF:-}" /usr/sbin/lsof lsof)"
+lsof_ok=1
+# listening PORT: 0 when lsof finds a listener on PORT. lsof finding none exits 1 and says nothing; anything else, and it
+# can't tell: that is said once, and no port is asked about again.
+listening() {
+  local said rc=0
+  [ "$lsof_ok" = 1 ] || return 1
+  said="$("$LSOF" -nP -iTCP:"$1" -sTCP:LISTEN 2>&1 < /dev/null)" || rc=$?
+  [ "$rc" != 0 ] || return 0
+  [ "$rc" != 1 ] || [ -n "$said" ] || return 1
+  lsof_ok=0
+  warn "couldn't tell whether anything listens on port $1 (lsof exited $rc: $(first_line "$said")), so the ports picked may be in use; offprint host-setup --print checks again."
+  return 1
+}
+nl='
+'
+N=""; i=2
+while [ "$i" -le 254 ]; do
+  case "$nl$used4$nl" in *"${nl}127.0.0.$i$nl"*) i=$((i + 1)); continue ;; esac
+  if listening $((4043 + 100 * i)) || listening $((4080 + 100 * i)); then i=$((i + 1)); continue; fi
+  N="$i"; break
+done
+[ -n "$N" ] || refuse "no free address: each from 127.0.0.2 to 127.0.0.254 is on lo0 or in $(_offprint_shown "$HOSTS"), or something listens on its ports; nothing was made."
+ip4="127.0.0.$N"; tls_port=$((4043 + 100 * N)); http_port=$((4080 + 100 * N))
+
+# The IPv6 prefix: fd, then 40 random bits, as three groups. lib/config.php wants the canonical form: no leading zeros in
+# a group, and no group of zeros but the run :: stands for (so a draw with one is drawn again).
+prefix=""
+if [ -n "${OFFPRINT_NEW_PREFIX:-}" ]; then draws="$OFFPRINT_NEW_PREFIX"; else draws="1 2 3 4 5 6 7 8 9 10"; fi
+set -f   # (the draws are split on spaces, never expanded as file names)
+for draw in $draws; do
+  if [ -n "${OFFPRINT_NEW_PREFIX:-}" ]; then
+    bits="$draw"
+  else
+    bits="$(od -An -tx1 -N5 /dev/urandom 2> /dev/null < /dev/null | tr -d ' \t\n')"
+  fi
+  case "$bits" in *[!0123456789abcdef]*) bits="" ;; esac
+  if [ "${#bits}" != 10 ]; then
+    [ -z "${OFFPRINT_NEW_PREFIX:-}" ] || refuse "each draw in OFFPRINT_NEW_PREFIX (a test seam) must be 10 lowercase hex digits, not '$(_offprint_shown "$draw")'."
+    failed "couldn't draw 40 random bits from /dev/urandom (with od); nothing was made."
+  fi
+  g2="$(printf '%s' "$bits" | cut -c3-6)"; g3="$(printf '%s' "$bits" | cut -c7-10)"
+  [ "$g2" != 0000 ] && [ "$g3" != 0000 ] || continue
+  while [ "${g2#0}" != "$g2" ]; do g2="${g2#0}"; done
+  while [ "${g3#0}" != "$g3" ]; do g3="${g3#0}"; done
+  prefix="fd$(printf '%s' "$bits" | cut -c1-2):$g2:$g3"
+  break
+done
+set +f
+if [ -z "$prefix" ]; then
+  [ -z "${OFFPRINT_NEW_PREFIX:-}" ] || refuse "OFFPRINT_NEW_PREFIX (a test seam) ran out of draws without a group of zeros; nothing was made."
+  failed "every draw of random bits had a group of zeros; nothing was made."
+fi
+ip6="$prefix::$N"
+
+# --- made, under a private name beside ./NAME; removed on any way out but the end ---
+work=""; made=0
+cleanup() {
+  trap '' INT TERM HUP
+  if [ -n "$work" ] && [ "$made" = 0 ]; then rm -rf -- "$work"; fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+work="$(mktemp -d "$cwd/.$name.new.XXXXXX" 2> /dev/null < /dev/null)" && [ -d "$work" ] \
+  || { work=""; failed "couldn't make a folder in $shown_cwd; nothing was made."; }
+# The mode mkdir would give it (the umask's), not mktemp's 700.
+chmod "$(printf '%o' $((0777 & ~0$(umask))))" "$work" 2> /dev/null || failed "couldn't set the new folder's mode; nothing was made."
+# public_url is written as a JSON string by php's own encoder, whatever it holds (a quote, a line end, a byte that isn't
+# UTF-8), so it can only be that string; lib/config.php then holds it to the rule. Every other value is made here, from
+# a name that has matched the rule already.
+url_json="$(php -r 'echo json_encode($argv[1], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);' -- "$url" 2> /dev/null < /dev/null)"
+[ -n "$url_json" ] || failed "couldn't write the public address as JSON (with php); nothing was made."
+{
+  printf '{\n'
+  printf '  "format": 1,\n'
+  printf '  "name": "%s",\n' "$name"
+  printf '  "public_url": %s,\n' "$url_json"
+  printf '  "local_host": "%s",\n' "$local_host"
+  printf '  "local_ip4": "%s",\n' "$ip4"
+  printf '  "local_ip6": "%s",\n' "$ip6"
+  printf '  "tls_port": %s,\n' "$tls_port"
+  printf '  "http_port": %s\n' "$http_port"
+  printf '}\n'
+} > "$work/site.json" && cp "$TOOL/templates/site.gitignore" "$work/.gitignore" \
+  || failed "couldn't write site.json and .gitignore in $shown_cwd; nothing was made."
+if ! said="$(php "$TOOL/lib/config.php" "$work" 2>&1 > /dev/null < /dev/null)"; then
+  printf '%s\n' "$said" >&2
+  refuse "site.json would have the problems above, so nothing was made."
+fi
+said="$(git -C "$work" init -q -b main 2>&1 < /dev/null)" || failed "git couldn't make the repository (git said: $(first_line "$said")); nothing was made."
+# Committed only by an identity git has been given (user.name and user.email, or git's variables): never one git would
+# guess from this Mac's user and host names.
+committed=0
+if git -C "$work" -c user.useConfigOnly=true var GIT_AUTHOR_IDENT > /dev/null 2>&1 < /dev/null \
+   && git -C "$work" -c user.useConfigOnly=true var GIT_COMMITTER_IDENT > /dev/null 2>&1 < /dev/null; then
+  said="$(git -C "$work" add -- site.json .gitignore 2>&1 < /dev/null)" \
+    || failed "git couldn't add site.json and .gitignore (git said: $(first_line "$said")); nothing was made."
+  if ! said="$(git -C "$work" -c user.useConfigOnly=true commit -q -m "A new site" 2>&1 < /dev/null)"; then
+    printf '%s\n' "$said" >&2
+    failed "git couldn't commit site.json and .gitignore (it said why, above); nothing was made."
+  fi
+  committed=1
+fi
+# Renamed by rename(2), through php: mv would move the folder into a ./NAME that appeared meanwhile.
+if [ -e "$cwd/$name" ] || [ -L "$cwd/$name" ] \
+   || ! php -r 'exit(@rename($argv[1], $argv[2]) ? 0 : 1);' -- "$work" "$cwd/$name" < /dev/null; then
+  failed "couldn't rename the new folder to ./$name (did something make one meanwhile?); nothing was made."
+fi
+made=1
+
+if [ "$committed" = 1 ]; then
+  echo "Made $name: a git repository on main, holding site.json and .gitignore, committed as \"A new site\"."
+else
+  echo "Made $name: a git repository on main, holding site.json and .gitignore, not committed: git has no user.name and user.email to commit them with (set them with git config)."
+fi
+echo "In its site.json:"
+printf '  %-10s  %s\n' name "$name" public_url "$url" local_host "$local_host" local_ip4 "$ip4" local_ip6 "$ip6" \
+  tls_port "$tls_port" http_port "$http_port"
+echo "Next, in this order:"
+echo "  cd $name"
+if [ "$committed" = 0 ]; then
+  echo "  git add site.json .gitignore"
+  echo "  git commit -m \"A new site\""
+fi
+echo "  offprint host-setup          (prints the sudo line to run)"
+echo "  offprint setup-wp"
+echo "  offprint publish --dry-run"
+# (this reads lo0, the hosts file and the listening ports, which hold another site's values only once its host-setup
+# has run: two sites made one after the other, before that, are given the same)
+echo "Run offprint host-setup for this site before making another: until then its address and ports are not yet taken on this Mac."
+echo "To publish to a host, add an adapter block to site.json: see the README."

@@ -1,0 +1,8 @@
+{
+  "name": "offprint-cloudflare-workers",
+  "private": true,
+  "description": "The wrangler the cloudflare-workers adapter runs, pinned. offprint adapter setup installs it with npm ci --ignore-scripts from package-lock.json.",
+  "dependencies": {
+    "wrangler": "4.166.0"
+  }
+}

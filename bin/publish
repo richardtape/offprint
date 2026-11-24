@@ -1,0 +1,871 @@
+#!/bin/bash
+# Export a site from its local WordPress, check it, replace site/, back up the database, commit, push, then have the
+# site's host make it live and wait until the live site serves it.
+#   offprint publish [--dry-run] [--no-push]
+# Run from inside the site folder (or with OFFPRINT_SITE set to it); every path below is the site folder's, and the
+# site's names come from its site.json, through lib/site.sh. Everything about the host (which files it writes, its
+# limits, how it deploys, how the live site is asked which publish it serves) comes from the adapter site.json names,
+# through lib/adapter.sh; with none named, the publish ends once it has pushed ("saved").
+#   --dry-run  stop after the checks, leaving the export in var/export, changing nothing else
+#   --no-push  stop after the commit (and do not require the main branch)
+# Progress is in var/status.json (shown in the WordPress admin bar) and var/publish.log.
+# Exits 0 when done, 1 when it failed, 2 when the compose project named in site.json is another folder's (both of
+# those in var/status.json too; 2 also for a usage mistake, with no site folder to write to, or with TMPDIR inside the
+# site folder: lib/site.sh refuses that before anything is written), and 75 (EX_TEMPFAIL)
+# when another publish holds the lock, so bin/publish-agent knows to try again later.
+# The publish commit is made with git commit-tree, so no commit hooks run (pre-commit, commit-msg, post-commit).
+# Needs bash 3.2 (macOS) or newer: no associative arrays, no mapfile, no empty-array expansion.
+set -u
+# git finds the repository from the site folder, and only from there. These variables say where a repository, its
+# objects, its work tree or its index are (those of git rev-parse --local-env-vars that do, and GIT_NAMESPACE). git
+# exports GIT_DIR inside any hook, so a publish started from one inherits it; left set, they would send every git call
+# below elsewhere, past the check that the site folder is the top of its own repository: the commit, with
+# backup/db.sql, into that other repository, or git's index there changed. pgit sets its own GIT_INDEX_FILE, for its
+# own calls only.
+unset GIT_DIR GIT_WORK_TREE GIT_IMPLICIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_PREFIX GIT_GRAFT_FILE GIT_SHALLOW_FILE
+# lib/site.sh first, found by the shell's own builtins: it makes the PATH safe to
+# use before anything is looked up on it.
+case "${BASH_SOURCE[0]}" in */*) here="${BASH_SOURCE[0]%/*}" ;; *) here=. ;; esac
+. "$here/../lib/site.sh" || exit 2
+. "$here/../lib/adapter.sh"
+offprint_find_site
+# site.json is read now, but a problem with it is reported below, once the lock is held, as this publish's failure in
+# var/status.json: exiting here would leave the status as it was ("live", say), and bin/publish-agent would take the
+# request as done. (With no site folder found, above, there is nowhere to write, and it exits 2.)
+SITE_OK=1; offprint_read_site || SITE_OK=0
+cd "$SITE" || exit 1
+VAR="$SITE/var"; LOG="$VAR/publish.log"; LOCK="$VAR/publish.lock"; EXPORT="$VAR/export"
+# How often the live site is asked whether it serves the publish. (How long for: the adapter's ADAPTER_CONFIRM_SECONDS,
+# or PUBLISH_TIMEOUT_SECONDS; set once the adapter is loaded. PUBLISH_CHECK_URL is the adapter's to read.)
+POLL="${PUBLISH_POLL_SECONDS:-5}"
+GH="${PUBLISH_GH:-gh}"   # GitHub's command-line tool, asked whether the repo is private
+GH_TIMEOUT="${PUBLISH_GH_TIMEOUT_SECONDS:-10}"   # how long gh may take to answer
+CHECK_TIMEOUT="${PUBLISH_CHECK_TIMEOUT:-300}"     # how long bin/check-site may take
+# Bringing git's own index in line after the commit: tries, and seconds between them, while something holds its lock.
+RESET_TRIES="${PUBLISH_RESET_TRIES:-20}"; RESET_WAIT="${PUBLISH_RESET_WAIT:-0.5}"
+
+dry_run=0; push=1
+for a in "$@"; do
+  case "$a" in
+    --dry-run) dry_run=1 ;;
+    --no-push) push=0 ;;
+    *) echo "usage: offprint publish [--dry-run] [--no-push]" >&2; exit 2 ;;
+  esac
+done
+
+# Every git call here: WordPress can write wp-content/ and var/export, and a git repository it plants there names, in
+# its own config, commands git runs when it looks inside (core.fsmonitor, run by a status). None may run. Nor may a
+# .gitattributes WordPress writes (a plugin's own, say) change how files are stored (line endings, filters): where
+# this git has --attr-source, attributes come from the empty tree instead of the files on disk, so only the owner's
+# own (.git/info/attributes, core.attributesFile) apply. Hooks are the owner's own, so they are left alone.
+ATTR_SOURCE=""
+empty_tree="$(command git -c core.fsmonitor=false hash-object -t tree /dev/null 2>/dev/null)"
+if [ -n "$empty_tree" ] && command git --attr-source="$empty_tree" -c core.fsmonitor=false check-attr -a -- probe > /dev/null 2>&1; then
+  ATTR_SOURCE="--attr-source=$empty_tree"
+fi
+git() { command git -c core.fsmonitor=false ${ATTR_SOURCE:+"$ATTR_SOURCE"} "$@"; }
+# pgit: git with the publish's private index (see "commit" below), never git's own.
+IDX=""
+pgit() { GIT_INDEX_FILE="$IDX" git "$@"; }
+# nested_git: the first .git folder or file under wp-content, in any case (the Mac's disk ignores case, and so does
+# git there), or nothing. git would stage it as a link to another repository instead of as files.
+nested_git() { find wp-content \( -iname .git \) -prune -print 2>/dev/null | head -n 1; }
+
+# The plugin's two paths in a site. The plugin a publish commits must be exactly this Offprint's own (see "the plugin",
+# at the commit): TOOL_PLUGIN, listed before the export from the tool's own plugin/ (lib/site.sh's
+# offprint_plugin_list: one line a file, "MODE HASH<tab>PATH", sorted), which WordPress can't reach.
+PLUGIN_PATHS="wp-content/mu-plugins/offprint.php wp-content/mu-plugins/offprint"
+TOOL_PLUGIN=""
+# plugin_in REV: what the commit or tree REV has at the two paths, listed as TOOL_PLUGIN is (git ls-tree -r, but for the
+# type); fails when git can't list it.
+plugin_in() {
+  local l
+  # shellcheck disable=SC2086 # the two paths
+  l="$(git ls-tree -r --full-tree "$1" -- $PLUGIN_PATHS 2>>"$LOG" < /dev/null)" || return 1
+  [ -z "$l" ] || printf '%s\n' "$l" | sed 's/^\([0-7]*\) [a-z]* /\1 /' | LC_ALL=C sort
+}
+# plugin_paths_in REV: those of the two paths the commit REV has.
+plugin_paths_in() {
+  local p had=""
+  for p in $PLUGIN_PATHS; do
+    [ -z "$(git ls-tree --full-tree "$1" -- "$p" 2>/dev/null < /dev/null)" ] || had="${had:+$had }$p"
+  done
+  printf '%s' "$had"
+}
+# plugin_on_disk: for a dry run, which builds no tree, the copy on disk, listed as TOOL_PLUGIN is: each file under the
+# two paths, its mode as git records it (100755 when its owner may run it, else 100644) and the git id of its bytes as
+# they are (hash-object --no-filters: no .gitattributes, WordPress's say, changes what is hashed); Finder's .DS_Store
+# files left out. Nothing is read through a link, and nothing that isn't a plain file is read at all (a FIFO would wait
+# forever): a link, by any name, anything that is neither a file nor a folder, a folder this Offprint's plugin lacks, a
+# file git can't hash or whose name holds a control character, is a line "odd -<tab>PATH", which nothing of the tool's
+# matches. With wp-content or wp-content/mu-plugins a link, that alone is listed.
+plugin_on_disk() {
+  local p e rel mode hash
+  for p in wp-content wp-content/mu-plugins; do
+    if [ -L "$p" ]; then printf 'odd -\t%s\n' "$p"; return 0; fi
+  done
+  for p in $PLUGIN_PATHS; do
+    if [ -e "$p" ] || [ -L "$p" ]; then find "$p" -print0 2>/dev/null < /dev/null; fi
+  done | while IFS= read -r -d '' e; do
+    case "$e" in *[[:cntrl:]]*) printf 'odd -\t%s\n' "$(printf '%s' "$e" | LC_ALL=C tr '\001-\037\177' '?')"; continue ;; esac
+    if [ -L "$e" ]; then printf 'odd -\t%s\n' "$e"; continue; fi
+    if [ -d "$e" ]; then
+      rel="${e#wp-content/mu-plugins/}"
+      case "$rel" in offprint|offprint/*) [ -d "$TOOL/plugin/$rel" ] && [ ! -L "$TOOL/plugin/$rel" ] && continue ;; esac
+      printf 'odd -\t%s\n' "$e"; continue
+    fi
+    if [ ! -f "$e" ]; then printf 'odd -\t%s\n' "$e"; continue; fi
+    case "$e" in */.DS_Store) continue ;; esac
+    mode=100644; [ -z "$(find "$e" -prune -perm -100 2>/dev/null < /dev/null)" ] || mode=100755
+    if hash="$(git hash-object --no-filters -- "$e" 2>/dev/null < /dev/null)" && [ -n "$hash" ]; then
+      printf '%s %s\t%s\n' "$mode" "$hash" "$e"
+    else
+      printf 'odd -\t%s\n' "$e"
+    fi
+  done | LC_ALL=C sort
+}
+# plugin_refusal HAVE HEAD REV: nothing when HAVE, the plugin this publish would commit (the tree's; for a dry run, the
+# copy on disk), is exactly this Offprint's own (TOOL_PLUGIN). Else why not, naming the first path where they differ,
+# and what to do, by what the commit REV has there (HEAD, listed by plugin_in; with REV empty, none):
+#   - nothing to commit at all: offprint setup-wp puts this Offprint's copy in place;
+#   - HEAD has none: offprint setup-wp commits this Offprint's, then git checkout puts its copy in place;
+#   - HEAD has this Offprint's: the copy was changed (by WordPress, or by hand), and git checkout puts it back;
+#   - HEAD has another (an older Offprint's): the command that replaces it, as setup-wp says it (lib/site.sh).
+# A file or folder the copy has and this Offprint's plugin lacks is named, for the owner to look at and remove: git
+# checkout leaves it, and git clean, which would remove more than it, is never suggested.
+plugin_refusal() {
+  local have="$1" head="$2" rev="$3" diffs first extra n list="" checkout
+  [ "$have" != "$TOOL_PLUGIN" ] || return 0
+  # Each path where the two differ, in git's order, and how: extra (only HAVE has it), missing, or changed.
+  diffs="$(printf '%s\n--\n%s\n' "$TOOL_PLUGIN" "$have" | awk -F '\t' '
+    BEGIN { tool = 1 }
+    $0 == "--" { tool = 0; next }
+    $0 == "" { next }
+    tool { t[$2] = $1; next }
+    { h[$2] = $1 }
+    END {
+      for (p in t) { if (!(p in h)) print p "\tmissing"; else if (h[p] != t[p]) print p "\tchanged" }
+      for (p in h) if (!(p in t)) print p "\textra"
+    }' | LC_ALL=C sort)"
+  first="$(printf '%s\n' "$diffs" | head -n 1 | cut -f1 | printable)"; [ -n "$first" ] || first="wp-content/mu-plugins"
+  extra="$(printf '%s\n' "$diffs" | awk -F '\t' '$2 == "extra" { print $1 }' | printable)"
+  if [ -n "$extra" ]; then
+    n="$(printf '%s\n' "$extra" | wc -l | tr -d ' ')"
+    list="$(printf '%s\n' "$extra" | head -n 5 | awk 'NR > 1 { printf ", " } { printf "%s", $0 }')"
+    [ "$n" -le 5 ] || list="$list and $((n - 5)) more"
+    list="; and look at, then remove, what this Offprint's plugin doesn't have: $list"
+  fi
+  checkout="git checkout -- $PLUGIN_PATHS"
+  if [ -z "$have" ]; then
+    printf '%s' "This site has no Offprint plugin to commit (first missing: $first). Nothing was committed. Run offprint setup-wp, then publish again."
+  elif [ -z "$head" ]; then
+    printf '%s' "This site has no Offprint plugin committed, and the copy in wp-content/mu-plugins isn't this Offprint's (first: $first). Nothing was committed. Run offprint setup-wp, which commits this Offprint's, then put its copy in place: $checkout$list."
+  elif [ "$head" = "$TOOL_PLUGIN" ]; then
+    printf '%s' "The plugin copy in wp-content/mu-plugins differs from this Offprint's, the one committed (first: $first): WordPress, or someone, changed it. Nothing was committed. To put back the committed copy: $checkout$list."
+  else
+    printf '%s' "The plugin copy in the repository isn't this Offprint's (an older Offprint's, say; first: $first). Nothing was committed. $(offprint_plugin_replace "$(plugin_paths_in "$rev")")"
+  fi
+}
+
+# Nothing may wait for a prompt (this runs under launchd).
+export GIT_TERMINAL_PROMPT=0
+if [ -z "${GIT_SSH_COMMAND:-}" ] && [ -z "$(git config core.sshCommand 2>/dev/null)" ]; then
+  export GIT_SSH_COMMAND='ssh -o BatchMode=yes'
+fi
+
+mkdir -p "$VAR"
+HAVE_LOCK=0; FINAL=0; COMMIT=""; WARNINGS=""
+cpid=""; ghpid=""   # the check and gh, while they run in the background
+BUSY=75
+
+# big_file PATH...: print the first file over 95 MB (GitHub refuses 100 MB) that git would not ignore. (An ignored
+# one is either in a folder WordPress keeps to itself, like wp-content/upgrade/, or refused later as left out.)
+big_file() {
+  find "$@" -type f -size +99614720c 2>/dev/null | while IFS= read -r f; do
+    git check-ignore -q "$f" 2>/dev/null || { echo "$f"; break; }
+  done
+}
+now() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
+log() { printf '%s %s\n' "$(now)" "$*" >> "$LOG"; }
+# kill_tree PID: that process and every process under it (their pids are read before it is stopped).
+kill_tree() {
+  local kids p
+  kids="$(pgrep -P "$1" 2>/dev/null)"
+  kill "$1" 2>/dev/null
+  for p in $kids; do kill_tree "$p"; done
+}
+# printable: control characters (other than line ends) as "?", for names that go into a message.
+printable() { LC_ALL=C tr '\001-\011\013-\037\177' '?'; }
+warn() { WARNINGS="$(printf '%s\n%s' "$WARNINGS" "$1" | grep .)"; log "$1"; }
+# json_text TEXT: TEXT as a JSON string, made without php (see status): each byte outside printable ASCII as ?, and
+# each \ and " escaped.
+json_text() { printf '"%s"' "$(printf '%s' "$1" | LC_ALL=C tr -c ' -~' '?' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"; }
+# remove PATH: rm -rf, once every folder in it can be changed: a mode the container set (a read-only folder in the
+# export, say) must not leave it behind. chmod -R follows no links.
+remove() {
+  [ -e "$1" ] || [ -L "$1" ] || return 0
+  [ -L "$1" ] || chmod -R u+rwX "$1" 2>/dev/null
+  rm -rf "$1"
+}
+
+# status STATE MESSAGE [final]: write var/status.json atomically (temp file in var/, then mv) and say it.
+# "running" is true for exporting/checking/pushing/deploying unless this is the final write of the run.
+# php writes it. When php can't (it isn't on the PATH, say), the same keys are written here, with no warnings: a
+# failure must still reach status.json, or the admin bar would go on showing the state before it ("live", say).
+status() {
+  local tmp running=false
+  tmp="$(mktemp "$VAR/.status.XXXXXX")" || return 1
+  case "$1" in exporting|checking|pushing|deploying) [ "${3:-}" = final ] || running=true ;; esac
+  printf '%s\n' "$WARNINGS" > "$tmp.w"
+  if ! ST_STATE="$1" ST_AT="$(now)" ST_COMMIT="$COMMIT" ST_MESSAGE="$2" ST_RUNNING="$running" php -r '
+    $w = array_values( array_filter( explode( "\n", (string) file_get_contents( $argv[1] ) ), "strlen" ) );
+    if ( count( $w ) > 50 ) { $n = count( $w ) - 50; $w = array_slice( $w, 0, 50 ); $w[] = "and $n more"; }
+    echo json_encode(
+      array( "state" => getenv( "ST_STATE" ), "running" => "true" === getenv( "ST_RUNNING" ), "at" => getenv( "ST_AT" ),
+             "commit" => getenv( "ST_COMMIT" ), "message" => getenv( "ST_MESSAGE" ), "warnings" => $w ),
+      JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE | JSON_PRETTY_PRINT
+    ), "\n";' "$tmp.w" > "$tmp" 2>> "$LOG"; then
+    printf '{"state":%s,"running":%s,"at":%s,"commit":%s,"message":%s,"warnings":[]}\n' \
+      "$(json_text "$1")" "$running" "$(json_text "$(now)")" "$(json_text "$COMMIT")" "$(json_text "$2")" > "$tmp"
+  fi
+  chmod 644 "$tmp" && mv "$tmp" "$VAR/status.json" || rm -f "$tmp"
+  rm -f "$tmp.w"
+  log "[$1] $2"
+  echo "[$1] $2"
+}
+fail() { FINAL=1; status failed "$1" final; exit 1; }
+finish() { FINAL=1; status "$1" "$2" final; exit 0; }
+# check_github: GitHub must have nothing this Mac lacks. Sets remote_main ("" before the very first publish, when
+# GitHub has no main yet). ls-remote fails only when GitHub can't be reached.
+check_github() {
+  remote_main="$(git ls-remote --heads origin refs/heads/main 2>>"$LOG" < /dev/null)" \
+    || fail "Couldn't reach GitHub to check main; see var/publish.log"
+  [ -n "$remote_main" ] || return 0
+  git fetch -q origin main >> "$LOG" 2>&1 < /dev/null || fail "Couldn't reach GitHub to check main; see var/publish.log"
+  if [ "$(git rev-list --count HEAD..origin/main 2>/dev/null || echo 0)" -gt 0 ]; then
+    fail "Main on GitHub has changes this Mac doesn't have; pull first"
+  fi
+}
+
+cleanup() {
+  # Whatever this left running in the background (the check, gh, an adapter function or the adapter's load) stops with
+  # it, and the adapter's private folder (lib/adapter.sh: the copy of adapter.sh, any answer) goes, on every exit.
+  for p in ${cpid:-} ${ghpid:-} ${OFFPRINT_ADAPTER_PID:-}; do kill -0 "$p" 2>/dev/null && kill_tree "$p"; done
+  offprint_adapter_cleanup
+  if [ "$HAVE_LOCK" = 1 ]; then
+    [ "$FINAL" = 1 ] || status failed "The publish stopped unexpectedly; see var/publish.log" final >/dev/null
+    [ -d site ] || { [ -d site.old ] && mv site.old site; }
+    remove site.new
+    [ -z "$IDX" ] || rm -f "$IDX" "$IDX.lock"
+    rm -f "$VAR/tree.txt" "$VAR/ignored.z" "$VAR/gh.out" "$VAR/gh.err" "$VAR/check.out" "$VAR/check.err"
+    rm -rf "$LOCK"
+  fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# --- the lock: mkdir is atomic. A lock older than 30 minutes whose process is gone is stale. ---
+# It records the pid and that process's command line: after a restart the same pid can be another program.
+take_lock() {
+  mkdir "$LOCK" 2>/dev/null && { echo "$$" > "$LOCK/pid"; ps -o command= -p "$$" > "$LOCK/command" 2>/dev/null; HAVE_LOCK=1; return 0; }
+  return 1
+}
+# holder_gone PID: the process that took the lock has ended: no pid, no such process, or (when the lock names one) a
+# process running another command.
+holder_gone() {
+  [ -n "$1" ] || return 0
+  kill -0 "$1" 2>/dev/null || return 0
+  [ -s "$LOCK/command" ] || return 1
+  [ "$(ps -o command= -p "$1" 2>/dev/null)" != "$(cat "$LOCK/command" 2>/dev/null)" ]
+}
+if ! take_lock; then
+  pid="$(cat "$LOCK/pid" 2>/dev/null || true)"
+  if [ -n "$(find "$LOCK" -maxdepth 0 -mmin +30 2>/dev/null)" ] && holder_gone "$pid"; then
+    log "removing a stale lock (older than 30 minutes, process '${pid:-unknown}' is not running, or is now another program)"
+    # Move the lock aside (only one rename can win, so two processes can't both take over). If the folder we
+    # moved holds a different pid from the stale one we read, someone took a fresh lock in between: put it back.
+    if mv "$LOCK" "$LOCK.stale.$$" 2>/dev/null; then
+      if [ "$(cat "$LOCK.stale.$$/pid" 2>/dev/null || true)" = "$pid" ]; then
+        rm -rf "$LOCK.stale.$$"
+      else
+        mv "$LOCK.stale.$$" "$LOCK" 2>/dev/null || rm -rf "$LOCK.stale.$$"
+        echo "A publish is already running (var/publish.lock)." >&2; exit "$BUSY"
+      fi
+    fi
+    take_lock || { echo "A publish is already running (var/publish.lock)." >&2; exit "$BUSY"; }
+  else
+    echo "A publish is already running (var/publish.lock); it will not start a second one." >&2
+    exit "$BUSY"
+  fi
+fi
+[ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 1000000 ] && mv "$LOG" "$LOG.1"
+log "publish started (dry-run=$dry_run, push=$push)"
+
+# --- site.json, read at the top: a problem with it is this publish's failure (every problem in the log) ---
+if [ "$SITE_OK" = 0 ]; then
+  printf '%s\n' "$OFFPRINT_SITE_PROBLEMS" >> "$LOG"; printf '%s\n' "$OFFPRINT_SITE_PROBLEMS" >&2
+  [ "$OFFPRINT_SITE_ERROR" != php ] || fail "php isn't on the PATH, so site.json couldn't be read; nothing was published."
+  first="$(printf '%s\n' "$OFFPRINT_SITE_PROBLEMS" | head -n 1 | printable)"
+  fail "site.json has a problem: ${first%.}; nothing was published."
+fi
+# --- the host adapter site.json names (lib/adapter.sh), and its settings there, before Docker is asked anything ---
+# One that can't be used (none of that name, a link, the site's own not committed as it is) is refused as the compose
+# project of another folder is, below: exit 2, with the reason in var/status.json.
+if ! offprint_adapter_load; then FINAL=1; status failed "$(printf '%s' "$OFFPRINT_ADAPTER_PROBLEM" | printable)" final; exit 2; fi
+# adapter.sh was loaded in a shell of its own, and only its adapter_ functions and ADAPTER_ variables came back; this
+# script's own traps are set again all the same, so its cleanup (the lock, site.new) is the one that runs.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+# Every adapter function runs through offprint_adapter_call, in a shell of its own: an exit, a cd, a trap or a variable
+# it sets can't change this script's status, exit code, lock or cleanup; one that ends without returning has failed.
+# Its settings are checked by the adapter itself; every problem is in the log, the first in the status.
+vrc=0; offprint_adapter_call adapter_validate > "$OFFPRINT_ADAPTER_TMP/validate.out" 2>&1 < /dev/null || vrc=$?
+problems="$(head -c 65536 "$OFFPRINT_ADAPTER_TMP/validate.out" 2>/dev/null)"; rm -f "$OFFPRINT_ADAPTER_TMP/validate.out"
+if [ "$OFFPRINT_ADAPTER_ENDED" != returned ]; then
+  printf '%s\n' "$problems" >> "$LOG"
+  fail "The adapter's settings couldn't be checked: its adapter_validate ended without returning (an exit, or an error); see var/publish.log. Nothing was published."
+fi
+if [ "$vrc" -ne 0 ]; then
+  printf '%s\n' "$problems" >> "$LOG"; printf '%s\n' "$problems" >&2
+  first="$(printf '%s\n' "$problems" | grep -m1 . | printable | cut -c1-300)"; first="${first%.}"
+  fail "site.json has a problem: ${first:-the adapter $ADAPTER_NAME refused its settings and said nothing}; nothing was published."
+fi
+# The publish's id goes into offprint.json, when the publish writes one, as 40 hex digits (what the default confirm
+# reads): a repository whose ids are longer (SHA-256: git's id of the empty tree, worked out above, has 64) is refused
+# here, before anything is exported. (The id itself is checked again once it is made: see "The publish's id" below.)
+case " $ADAPTER_PREPARE_FILES " in
+  *" offprint.json "*)
+    if [ -n "$empty_tree" ] && [ "${#empty_tree}" != 40 ]; then
+      fail "Git's ids in this site folder are ${#empty_tree} hex digits (a SHA-256 repository?), and the publish's id, which offprint.json gives the live site, must be 40; nothing was published."
+    fi ;;
+esac
+TIMEOUT="${PUBLISH_TIMEOUT_SECONDS:-$ADAPTER_CONFIRM_SECONDS}"
+# --- the compose project named in site.json must be this site folder's own (lib/site.sh: offprint_own_project) ---
+# Asked here, in this shell, so the answer is remembered for every docker compose call below (dc ps runs in a pipeline,
+# where it would be lost). Another folder's project: the publish fails, exit 2, and docker compose never runs. Docker
+# not answering (3): dc ps, just below, is let through, fails the same way, and says WordPress isn't running.
+own=0; offprint_own_project || own=$?
+if [ "$own" = 1 ]; then FINAL=1; status failed "$OFFPRINT_PROJECT_PROBLEM" final; exit 2; fi
+
+# A crash in the middle of a swap: put the old site back, drop the half-built one.
+[ -d site ] || { [ -d site.old ] && mv site.old site; }
+remove site.new
+
+# --- before touching anything ---
+status exporting "Exporting the site from WordPress"
+if ! dc ps --status running --services 2>>"$LOG" | grep -qx wordpress; then
+  fail "WordPress isn't running (offprint compose up -d)"
+fi
+if [ "$dry_run" = 0 ]; then
+  # The site folder must be the top of its own git repository. Inside another one, the commit would go into that
+  # repository, with every path relative to this folder, and the site's .gitignore (anchored at its root) wouldn't
+  # apply. The two are compared as folders on disk (-ef), not as names: on the Mac /var is a link to /private/var, and
+  # its disk ignores case, so the site folder may be reached by a name in another case than the one git gives.
+  top="$(git rev-parse --show-toplevel 2>>"$LOG")" || fail "This site folder isn't a git repository; run git init here first."
+  [ -n "$top" ] && [ "$top" -ef "$SITE" ] \
+    || fail "This site folder isn't the top of its own git repository (git's is $top); nothing was published."
+  gitdir="$(git rev-parse --absolute-git-dir 2>>"$LOG")" && [ -d "$gitdir" ] || fail "Couldn't find the repository's .git folder"
+  # A merge, rebase, cherry-pick, revert or bisect under way is the owner's to finish: a publish would commit its
+  # conflict markers, and clear its conflicts from git's index.
+  if [ -n "$(git ls-files -u 2>/dev/null | head -n 1)" ] || [ -e "$gitdir/MERGE_HEAD" ] || [ -e "$gitdir/CHERRY_PICK_HEAD" ] \
+    || [ -e "$gitdir/REVERT_HEAD" ] || [ -e "$gitdir/BISECT_LOG" ] || [ -d "$gitdir/rebase-merge" ] || [ -d "$gitdir/rebase-apply" ]; then
+    fail "A merge or rebase is in progress in this folder; finish or abort it first."
+  fi
+  # The commit's index is built afresh (see "commit"), so with core.fileMode false every file would go in as not
+  # executable.
+  [ "$(git config --bool core.fileMode 2>/dev/null)" != false ] \
+    || fail "git's core.fileMode is false in this folder, so a publish would store every file as not executable; run git config core.fileMode true, then publish again."
+  # Changes staged only inside site/, wp-content/ and backup/ are what a publish leaves when it couldn't bring git's
+  # index in line (see the end of "commit"). Unstaged now, before anything else, so a commit by hand can't undo a
+  # publish with them. (Staged changes elsewhere too: left alone, and refused just below.)
+  if git diff --cached --quiet --ignore-submodules=all -- . ':!site' ':!wp-content' ':!backup' \
+    && ! git diff --cached --quiet --ignore-submodules=all -- site wp-content backup; then
+    if git reset -q -- site wp-content backup >> "$LOG" 2>&1 < /dev/null; then
+      log "git's index had changes staged in site/, wp-content/ or backup/; they were unstaged (the files are untouched)"
+    else
+      log "git's index has changes staged in site/, wp-content/ or backup/, and they couldn't be unstaged now"
+    fi
+  fi
+  git diff --cached --quiet --ignore-submodules=all -- . ':!site' ':!wp-content' ':!backup' \
+    || fail "There are staged changes; commit or unstage them first"
+  branch="$(git symbolic-ref --short -q HEAD || true)"
+  if [ "$push" = 1 ] && [ "$branch" != "main" ]; then
+    fail "Publishing only works from the main branch (this is '${branch:-detached}'); switch to main"
+  fi
+  # GitHub before anything is exported or committed: when it has a commit this Mac lacks, main here can then simply
+  # fast-forward (git pull --ff-only). It is asked again just before the push.
+  [ "$push" = 0 ] || check_github
+  plugin_changes="$(git status --porcelain --ignore-submodules=all -- wp-content/mu-plugins/offprint.php wp-content/mu-plugins/offprint 2>/dev/null)"
+  [ -z "$plugin_changes" ] \
+    || fail "The publish plugin has uncommitted changes (first: $(printf '%s\n' "$plugin_changes" | head -n 1 | cut -c4-)); commit them first."
+  nested="$(nested_git)"
+  [ -z "$nested" ] || fail "There is a git repository inside wp-content at $nested; remove it first."
+fi
+# This Offprint's own plugin, which the plugin a publish commits must be exactly (see "the plugin", at the commit; a dry
+# run compares the copy on disk with it), listed now, before anything is exported, from the tool's own plugin/:
+# WordPress can't reach it. One that can't be listed is refused here, as nothing could be checked against it.
+if ! offprint_plugin_list TOOL_PLUGIN; then
+  case "$OFFPRINT_PLUGIN_PROBLEM" in
+    "odd "*) fail "This Offprint's own plugin folder is missing a part, or holds something that is neither a file nor a folder ($(printf '%s\n' "${OFFPRINT_PLUGIN_PROBLEM#odd }" | head -n 1 | printable)), so the site's copy can't be checked against it; nothing was published." ;;
+    "git "*) fail "Git couldn't hash this Offprint's own plugin (git said: $(printf '%s\n' "${OFFPRINT_PLUGIN_PROBLEM#git }" | head -n 1 | printable)), so the site's copy can't be checked against it; nothing was published." ;;
+    *) fail "This Offprint's own plugin folder couldn't be read ($(printf '%s\n' "$TOOL/plugin" | printable)), so the site's copy can't be checked against it; nothing was published." ;;
+  esac
+fi
+
+# --- export ---
+mkdir -p "$EXPORT"
+chmod -R u+rwX "$EXPORT" 2>/dev/null   # a read-only folder the last export left must not stop this one
+find "$EXPORT" -mindepth 1 -delete 2>>"$LOG" || fail "Couldn't empty var/export"
+out="$VAR/export.out"
+rc=0
+dc exec -T -u www-data wordpress wp offprint export --out=/var/www/export > "$out" 2> "$out.err" < /dev/null || rc=$?
+cat "$out" "$out.err" >> "$LOG"
+WARNINGS="$(grep '^Warning: ' "$out" || true)"
+if [ "$rc" -ne 0 ]; then
+  errors="$(grep -c '^Error: ' "$out" || true)"
+  first="$(grep -m1 '^Error: ' "$out" | sed 's/^Error: //' | cut -c1-200 || true)"
+  # a crash before the exporter ran prints its Error: on stderr instead
+  [ -n "$first" ] || first="$(grep -m1 '^Error: ' "$out.err" | sed 's/^Error: //' | cut -c1-200 || true)"
+  msg="${first:-The export failed; see var/publish.log}"
+  [ "${errors:-0}" -gt 0 ] && msg="$msg ($errors error(s) in all; see var/publish.log)"
+  fail "$msg"
+fi
+rm -f "$out" "$out.err"
+
+# --- checks, on a private copy ---
+# WordPress is still running and can write var/export, so what is checked, and then published, is a copy
+# it can't reach: site.new. Links are copied as links (and then refused, below), never followed.
+status checking "Checking the export"
+mkdir site.new && cp -RP "$EXPORT/." site.new/ || fail "Couldn't copy the export into site.new"
+# Finder's .DS_Store files (from looking at var/export on the Mac) are never published.
+find site.new -name .DS_Store -type f -delete 2>>"$LOG"
+# Anything but files, folders and links (a FIFO, say) is refused before anything reads it: reading a FIFO
+# would wait forever.
+odd="$(find site.new ! -type f ! -type d ! -type l 2>/dev/null | head -n 1)"
+[ -z "$odd" ] || fail "The export has something that isn't a file or a folder, so nothing was published: var/export/${odd#site.new/}"
+# Links too, anywhere in the copy, before the adapter writes into it: a file it writes by a name a link holds would go
+# wherever the link points, out of the site folder. (bin/check-site refuses them again, and names every one.)
+link="$(find site.new -type l 2>/dev/null | head -n 1 | printable)"
+[ -z "$link" ] || fail "The export has a symlink, so nothing was published: var/export/${link#site.new/}"
+# The names the adapter's own files take at the root (ADAPTER_PREPARE_FILES: the publish writes them), its host's
+# (ADAPTER_HOST_FILES: the deploy writes them), and those its host gives a meaning of its own there
+# (ADAPTER_HOST_SPECIAL_FILES: an ignore file could leave checked files out of the live site), in any case: one from
+# the export would stand in for the publish's own, or change what the host does with the rest, so it is refused here,
+# before the adapter writes anything. Asked two ways: find -iname (letter case in ASCII, on any
+# disk), and the disk's own lookup of the name, which on a disk that ignores case (the Mac's) folds it in Unicode too
+# (a long s for an s, the ff ligature for ff); the entry that lookup reaches is named by its inode.
+# (bin/check-site refuses them again, all but those the adapter has just written.)
+refuse_reserved() {  # refuse_reserved WHO NAME...: WHO writes each NAME (WHO "special": the host gives each a meaning)
+  local who="$1" r hit ino; shift
+  for r in "$@"; do
+    hit="$(cd site.new && find . -mindepth 1 -maxdepth 1 -iname "$r" 2>/dev/null | head -n 1 | printable)"
+    if [ -z "$hit" ] && { [ -e "site.new/$r" ] || [ -L "site.new/$r" ]; }; then
+      ino="$(ls -di -- "site.new/$r" 2>/dev/null | awk '{ print $1; exit }')"
+      [ -z "$ino" ] || hit="$(cd site.new && find . -mindepth 1 -maxdepth 1 -inum "$ino" 2>/dev/null | head -n 1 | printable)"
+      [ -n "$hit" ] || hit="./$r"
+    fi
+    [ -z "$hit" ] || [ "$who" != special ] \
+      || fail "The export failed the checks, nothing was published: the host gives $r a meaning of its own at the root, so the export can't have one: $hit"
+    [ -z "$hit" ] || fail "The export failed the checks, nothing was published: $who writes $r at the root, so the export can't have one: $hit"
+  done
+}
+refuse_reserved "the publish" $ADAPTER_PREPARE_FILES
+refuse_reserved "the deploy" $ADAPTER_HOST_FILES
+refuse_reserved special $ADAPTER_HOST_SPECIAL_FILES
+# The adapter's own files, written into the private copy (never into var/export, which WordPress can write), so the
+# checks below look at them too.
+# (When it refuses, the reason it gives in ADAPTER_PROBLEM, if any, is the status's.)
+prc=0; offprint_adapter_call adapter_prepare "$SITE/site.new" >> "$LOG" 2>&1 < /dev/null || prc=$?
+if [ "$OFFPRINT_ADAPTER_ENDED" != returned ] || [ "$prc" -ne 0 ]; then
+  reason="$(printf '%s\n' "$ADAPTER_PROBLEM" | head -n 1 | printable | cut -c1-300)"
+  [ "$OFFPRINT_ADAPTER_ENDED" = returned ] && [ -n "$reason" ] \
+    && fail "The adapter couldn't prepare the export: $reason; nothing was published."
+  fail "The adapter couldn't prepare the export (see var/publish.log); nothing was published."
+fi
+# And each is there now, as it should be: at the root, a plain file (not a link, not a folder), by exactly that name.
+# (offprint.json is the publish's own, written after the checks: see below, and "commit".)
+for r in $ADAPTER_PREPARE_FILES; do
+  [ "$r" != offprint.json ] || continue
+  if [ -L "site.new/$r" ] || [ -z "$(cd site.new && find . -mindepth 1 -maxdepth 1 -name "$r" -type f 2>/dev/null)" ]; then
+    fail "The adapter was to write $r at the root of the export, as a plain file, and didn't; nothing was published."
+  fi
+done
+# offprint.json, when it is one of them (the default confirm reads it), is the publish's own, written once the publish's
+# id is known, after the checks (see "commit"): nothing has written it yet, so the checks allow none by that name, in
+# any case, whoever wrote it (the export, or adapter_prepare). The adapter's other files are allowed as it wrote them.
+# The host's limits count it all the same, as the file still to come (one more file, of its size), so they hold for what
+# is published: what the checks pass here is what they pass on the site/ this publish leaves (offprint check), the count
+# of files and each file's size exactly, the compressed total to within some tens of bytes (see bin/check-site).
+id_json() { printf '{"publish":"%s"}\n' "$1"; }   # offprint.json, naming the publish ID
+WRITES_ID=0; allowed=""; to_come=""; to_come_bytes=0
+for r in $ADAPTER_PREPARE_FILES; do if [ "$r" = offprint.json ]; then WRITES_ID=1; else allowed="${allowed:+$allowed }$r"; fi; done
+if [ "$WRITES_ID" = 1 ]; then
+  to_come=offprint.json; to_come_bytes="$(id_json 0000000000000000000000000000000000000000 | wc -c | tr -d ' ')"
+fi
+# In the background, stopped (with everything it started) after CHECK_TIMEOUT seconds: an export built to keep the
+# check busy must not hang the publish, and the agent behind it. It is the tool's, given the site's two hosts, the
+# names only the publish may write at the root (which of them it has written, and which it still writes), those the
+# host gives a meaning of its own there, and the host's limits, each set here, so none comes from this script's own
+# environment.
+CHECK_SITE_HOST="$SITE_PUBLIC_HOST" CHECK_SITE_LOCAL_HOST="$SITE_LOCAL_HOST" \
+  CHECK_SITE_RESERVED="$ADAPTER_PREPARE_FILES $ADAPTER_HOST_FILES" CHECK_SITE_ALLOWED="$allowed" \
+  CHECK_SITE_SPECIAL="$ADAPTER_HOST_SPECIAL_FILES" CHECK_SITE_TO_COME="$to_come" CHECK_SITE_TO_COME_BYTES="$to_come_bytes" \
+  CHECK_SITE_MAX_BYTES="$ADAPTER_MAX_TOTAL_BYTES" CHECK_SITE_MAX_FILES="$ADAPTER_MAX_FILES" \
+  CHECK_SITE_MAX_FILE_BYTES="$ADAPTER_MAX_FILE_BYTES" \
+  /bin/bash "$TOOL/bin/check-site" "$SITE/site.new" > "$VAR/check.out" 2> "$VAR/check.err" < /dev/null &
+cpid=$!
+waited=0
+while kill -0 "$cpid" 2>/dev/null && [ "$waited" -lt $((CHECK_TIMEOUT * 10)) ]; do sleep 0.1; waited=$((waited + 1)); done
+if kill -0 "$cpid" 2>/dev/null; then
+  kill_tree "$cpid"; wait "$cpid" 2>/dev/null; cpid=""
+  cat "$VAR/check.out" "$VAR/check.err" >> "$LOG" 2>/dev/null; rm -f "$VAR/check.out" "$VAR/check.err"
+  fail "Checking the export took longer than $CHECK_TIMEOUT seconds and was stopped; nothing was published."
+fi
+crc=0; wait "$cpid" || crc=$?; cpid=""
+problems="$(cat "$VAR/check.out")"; rm -f "$VAR/check.out"
+if [ -s "$VAR/check.err" ]; then
+  cat "$VAR/check.err" >> "$LOG"; cat "$VAR/check.err" >&2
+  WARNINGS="$(printf '%s\n%s' "$WARNINGS" "$(cat "$VAR/check.err")" | grep .)"
+fi
+rm -f "$VAR/check.err"
+if [ "$crc" -ne 0 ]; then
+  printf '%s\n' "$problems" >> "$LOG"
+  first="$(printf '%s\n' "$problems" | head -n 1)"
+  fail "The export failed the checks, nothing was published: ${first:-see var/publish.log}"
+fi
+if [ "$dry_run" = 1 ]; then
+  # The plugin, as a publish checks the one it commits (see "the plugin", at the commit), and refused the same way; but
+  # a dry run builds no tree, so it is the copy on disk (plugin_on_disk: never read through a link, and only plain files
+  # read at all) that must be exactly this Offprint's. What HEAD has there only chooses the words, and only when the site
+  # folder is the top of its own repository.
+  dry_rev=""; dry_head=""
+  top="$(git rev-parse --show-toplevel 2>/dev/null < /dev/null)" || top=""
+  if [ -n "$top" ] && [ "$top" -ef "$SITE" ]; then
+    dry_rev="$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null < /dev/null)" || dry_rev=""
+    [ -z "$dry_rev" ] || dry_head="$(plugin_in "$dry_rev")" || dry_head=""
+  fi
+  refusal="$(plugin_refusal "$(plugin_on_disk)" "$dry_head" "$dry_rev")"
+  [ -z "$refusal" ] || fail "$refusal"
+  remove site.new
+  finish checking "Dry run: a copy of the export passed the checks; the export is in var/export, and nothing else changed."
+fi
+
+# --- nothing over 95 MB may reach git; refuse before site/ is touched ---
+big="$(find site.new -type f -size +99614720c 2>/dev/null | head -n 1)"
+if [ -n "$big" ]; then big="var/export/${big#site.new/}"; else big="$(big_file wp-content)"; fi
+[ -z "$big" ] || fail "${big#"$SITE"/} is over 95 MB and GitHub would refuse it; remove it"
+
+# --- replace site/ with the checked copy (swap with renames) ---
+status checking "Replacing the site and backing up the database"
+remove site.old
+[ ! -e site.old ] || fail "Couldn't remove an old site.old folder"
+{ [ ! -e site ] || mv site site.old; } || fail "Couldn't move the old site folder aside"
+if ! mv site.new site; then
+  [ -d site ] || mv site.old site
+  fail "Couldn't swap in the new site folder; the old one is back"
+fi
+remove site.old
+
+# --- database dump: only replaces backup/db.sql when it is whole ---
+mkdir -p backup || fail "Couldn't create the backup folder"
+dump="$VAR/db.sql.tmp"
+drc=0
+dc exec -T db sh -c 'exec mariadb-dump --skip-dump-date --skip-extended-insert --single-transaction -u"$MARIADB_USER" -p"$MARIADB_PASSWORD" "$MARIADB_DATABASE"' \
+  > "$dump" 2>>"$LOG" < /dev/null || drc=$?
+if [ "$drc" -ne 0 ] || [ ! -s "$dump" ] || [ "$(grep -v '^[[:space:]]*$' "$dump" | tail -n 1)" != "-- Dump completed" ]; then
+  rm -f "$dump"
+  fail "The database backup didn't finish, so nothing was committed; see var/publish.log"
+fi
+[ -z "$(find "$dump" -size +99614720c 2>/dev/null)" ] || { rm -f "$dump"; fail "The database backup is over 95 MB and GitHub would refuse it"; }
+dump_bytes="$(wc -c < "$dump" | tr -d ' ')"
+mv "$dump" backup/db.sql || fail "Couldn't put the database backup in place"
+
+# --- commit, from a private index ---
+# The commit is built in an index of this script's own (GIT_INDEX_FILE, in the repository's .git folder, which
+# WordPress can't reach) and written as a tree; every check below reads that tree, and that same tree is what is
+# committed (git commit-tree, then git update-ref). Nothing in site/, wp-content/ or backup/ is read again after git
+# add, so a file WordPress swaps afterwards (for a git repository, say, or one over 95 MB) is committed as it was when
+# it was added and checked. (The publish's id is the index's tree of site/, and site/offprint.json, which names it, is
+# written after git add and put in the index from what was written.) git commit-tree runs no commit hooks (pre-commit,
+# commit-msg, post-commit); git update-ref runs the reference-transaction hook, if there is one. Git's own index is
+# brought in line, for the three folders only, at the end: anything else staged there stays staged, and out of the
+# publish.
+old="$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null || true)"
+for d in site wp-content backup; do
+  if [ ! -e "$d" ] && [ -n "$old" ] && [ -n "$(git ls-tree --name-only "$old" -- "$d" 2>/dev/null)" ]; then
+    fail "$d is missing; nothing was committed"
+  fi
+done
+# Again, now: WordPress was running all this time. (site/ needs no look: bin/check-site refused any .git in it.)
+nested="$(nested_git)"
+[ -z "$nested" ] || fail "There is a git repository inside wp-content at $nested; remove it first. Nothing was committed."
+gitdir="$(git rev-parse --absolute-git-dir 2>>"$LOG")" && [ -d "$gitdir" ] || fail "Couldn't find the repository's .git folder; nothing was committed"
+IDX="$gitdir/publish-index.$$"
+rm -f "$IDX" "$IDX.lock"
+if [ -n "$old" ]; then pgit read-tree "$old" >> "$LOG" 2>&1 < /dev/null; else pgit read-tree --empty >> "$LOG" 2>&1 < /dev/null; fi \
+  || fail "Git couldn't start the publish's index from the last commit; see var/publish.log"
+# The three folders are added afresh. An entry kept from the last commit keeps its old name on this Mac's
+# case-insensitive disk: a file exported as about.html after About.html would stay About.html in git, and the
+# server, whose disk minds case, would answer 404 at the new address.
+pgit rm -r -q -f --cached --ignore-unmatch -- site wp-content backup >> "$LOG" 2>&1 < /dev/null \
+  || fail "Git couldn't clear the publish's index; see var/publish.log"
+# site/ is exactly the copy that passed the checks: added with -f, so no .gitignore or excludes file can leave a
+# file out of it. Only the host's own files at its root (ADAPTER_HOST_FILES: the deploy writes them), Finder's
+# .DS_Store files and, when the publish writes it, offprint.json (put in the index below from what the publish writes,
+# never from the disk) stay out. (Each name is a plain file name: lib/adapter.sh checked it.)
+add_site() {
+  local h; set -- site
+  for h in $ADAPTER_HOST_FILES; do set -- "$@" ":(exclude)site/$h"; done
+  [ "$WRITES_ID" = 0 ] || set -- "$@" ':(exclude)site/offprint.json'
+  pgit add -A -f -- "$@" ':(exclude,glob)site/**/.DS_Store'
+}
+if [ -e site ]; then
+  add_site >> "$LOG" 2>&1 < /dev/null || fail "Git add failed; see var/publish.log"
+fi
+if [ -e wp-content ]; then
+  pgit add -A -- wp-content >> "$LOG" 2>&1 < /dev/null || fail "Git add failed; see var/publish.log"
+fi
+# backup/ holds only the dump this run has just written: added with -f too, so no ignore rule (a *.sql in git's
+# excludes file, say) can leave it out of the commit, which would delete it from the backup.
+pgit add -A -f -- backup ':(exclude,glob)backup/**/.DS_Store' >> "$LOG" 2>&1 < /dev/null || fail "Git add failed; see var/publish.log"
+# The publish's id, which the adapter's confirm is given with the commit: the git tree of site/ as it is in the
+# publish's index now (the copy that passed the checks, with the adapter's own files; offprint.json, when the publish
+# writes it, is not in it yet), written from that index, not read again from the disk. A tree id names content only
+# (each file's bytes as git stores them, its name and the mode git records), in git's own order: so the same content
+# always has the same id, whatever the order, times or permissions the files were made with, the locale, or the folder's
+# name when it was checked (site.new), and a publish with nothing new commits nothing. (How git stores a file is the
+# owner's settings alone: the export can have no .gitattributes, and core.fileMode false is refused above.) When the
+# publish writes it into offprint.json, for the default confirm, it must be 40 hex digits (what that confirm reads): a
+# repository whose ids are longer is refused before the export (beside adapter_validate, above), and the id is checked
+# again here, before anything is written or committed. An adapter with a confirm of
+# its own is given the id as git gives it.
+id_re='^[0-9a-f]{40}$'
+PUBLISH_ID="$(pgit write-tree --prefix=site/ 2>>"$LOG" < /dev/null)"
+if [ "$WRITES_ID" = 1 ] && ! ( LC_ALL=C; [[ $PUBLISH_ID =~ $id_re ]] ); then
+  fail "Git couldn't give the publish's id as 40 hex digits (the tree of site/: is this a SHA-256 repository?); nothing was committed. See var/publish.log."
+fi
+# offprint.json, when the publish writes it, is exactly {"publish":"ID"} and a line end: in site/, for the host
+# (whatever is there by that name removed first, never written through), and in the publish's index, its blob made from
+# those same bytes (no filter applies to it), not read back from the disk.
+if [ "$WRITES_ID" = 1 ]; then
+  id_blob="$(id_json "$PUBLISH_ID" | git hash-object -w --stdin 2>>"$LOG")" \
+    && { rm -f site/offprint.json && id_json "$PUBLISH_ID" > site/offprint.json; } 2>>"$LOG" \
+    && pgit update-index --add --cacheinfo "100644,$id_blob,site/offprint.json" >> "$LOG" 2>&1 < /dev/null \
+    || fail "Couldn't write site/offprint.json, the publish's id; nothing was committed. See var/publish.log."
+fi
+tree="$(pgit write-tree 2>>"$LOG" < /dev/null)" && [ -n "$tree" ] || fail "Git couldn't write the publish's tree; see var/publish.log"
+# And it must be in the tree exactly as written (a filter in git's own settings could change it on the way in).
+in_tree="$(git ls-tree -l "$tree" -- backup/db.sql 2>>"$LOG" < /dev/null | awk '$2 == "blob" { print $4; exit }')"
+[ "$in_tree" = "$dump_bytes" ] \
+  || fail "The database backup isn't in the commit as it was written (${in_tree:-missing} instead of $dump_bytes bytes: a filter or attribute in git's settings?); nothing was committed. See var/publish.log."
+
+# The tree's own checks. A repository that appeared before git add is in it as a link (mode 160000), not as files, and
+# a plain git status would look inside it, running what its config names. GitHub refuses a file over 95 MB.
+git ls-tree -r -l "$tree" -- site wp-content backup > "$VAR/tree.txt" 2>>"$LOG" < /dev/null \
+  || fail "Git couldn't list the publish's tree; see var/publish.log"
+gitlink="$(awk '$1 == "160000" { sub(/^[^\t]*\t/, ""); print; exit }' "$VAR/tree.txt" | printable)"
+big="$(awk '$1 != "160000" && $4 + 0 > 99614720 { sub(/^[^\t]*\t/, ""); print; exit }' "$VAR/tree.txt" | printable)"
+rm -f "$VAR/tree.txt"
+[ -z "$gitlink" ] || fail "There is a git repository at $gitlink; nothing was committed. Remove it first."
+[ -z "$big" ] || fail "$big is over 95 MB and GitHub would refuse it; remove it. Nothing was committed."
+# Anything left out of the index is hidden by a .gitignore (a plugin's own, say) or git's excludes file, and would be
+# missing from the live site or from the backup. Only WordPress's cache and upgrade folders, its debug.log and
+# Finder's .DS_Store files may be left out.
+pgit --no-optional-locks status --porcelain -z --ignored=matching --untracked-files=all --ignore-submodules=all -- site wp-content \
+  > "$VAR/ignored.z" 2>>"$LOG" < /dev/null || fail "Git status failed; see var/publish.log"
+left="$(tr '\0' '\n' < "$VAR/ignored.z" | sed -n 's/^!! //p' \
+  | grep -Ev '^wp-content/(upgrade/|upgrade-temp-backup/|cache/|debug\.log$)|(^|/)\.DS_Store$')"
+rm -f "$VAR/ignored.z"
+if [ -n "$left" ]; then
+  # The rule that hides the first of them, as "<file>:<line>:<pattern>".
+  rule="$(pgit check-ignore -v --no-index -- "$(printf '%s\n' "$left" | head -n 1)" 2>>"$LOG" < /dev/null | head -n 1 | cut -f1 | printable)"
+  left="$(printf '%s\n' "$left" | printable)"
+  n="$(printf '%s\n' "$left" | wc -l | tr -d ' ')"
+  list="$(printf '%s\n' "$left" | head -n 5 | awk 'NR > 1 { printf ", " } { printf "%s", $0 }')"
+  [ "$n" -le 5 ] || list="$list and $((n - 5)) more"
+  fail "These files would be left out of the publish: $list. A .gitignore or git's excludes file hides them${rule:+ (the first by $rule)}; nothing was committed."
+fi
+# The plugin. WordPress runs it from its copy in wp-content/mu-plugins/, which it can write, and the export runs it. The
+# refusal of uncommitted changes to that copy comes before the export, and wp-content/ is added afresh after it: so a
+# change WordPress made to the copy while it exported would be committed here, unchecked, and no later publish would
+# refuse it (the copy would then match its commit). So the plugin in the tree being committed must be exactly this
+# Offprint's own (TOOL_PLUGIN, listed from the tool's plugin/ before the export): each file's mode and the id of its
+# bytes as git stores them, and nothing else under the two paths. Otherwise nothing is committed, and the refusal names
+# the first path that differs and says what to do (plugin_refusal, by what HEAD has there).
+plugin_have="$(plugin_in "$tree")" || fail "Git couldn't list the publish's tree; see var/publish.log"
+plugin_head=""
+if [ -n "$old" ]; then plugin_head="$(plugin_in "$old")" || fail "Git couldn't list the last commit; see var/publish.log"; fi
+refusal="$(plugin_refusal "$plugin_have" "$plugin_head" "$old")"
+[ -z "$refusal" ] || fail "$refusal"
+committed=0
+if [ -z "$old" ] || [ "$tree" != "$(git rev-parse -q --verify "$old^{tree}" 2>/dev/null)" ]; then
+  subject="Publish: $(date -u '+%Y-%m-%d %H:%M UTC')"
+  new="$(git commit-tree "$tree" ${old:+-p "$old"} -m "$subject" 2>>"$LOG" < /dev/null)" && [ -n "$new" ] \
+    || fail "Git commit failed; see var/publish.log"
+  where="${branch:-HEAD}"
+  # Moved only from the commit this publish started from: if anything else committed meanwhile, this fails and
+  # changes nothing.
+  git update-ref -m "publish: $subject" HEAD "$new" "$old" >> "$LOG" 2>&1 < /dev/null \
+    || fail "Git couldn't move $where to the new commit (did something else commit meanwhile?); nothing was committed. See var/publish.log"
+  # Belt and braces: the commit now on the branch must hold no link to a repository. If it does (or can't be read),
+  # the branch goes back to the commit before it.
+  undo=""
+  if ! git ls-tree -r HEAD -- site wp-content backup > "$VAR/tree.txt" 2>>"$LOG" < /dev/null; then undo="couldn't be checked"
+  elif grep -q '^160000 ' "$VAR/tree.txt"; then undo="had a link to a git repository in it"; grep -m1 '^160000 ' "$VAR/tree.txt" | printable >> "$LOG"; fi
+  rm -f "$VAR/tree.txt"
+  if [ -n "$undo" ]; then
+    if [ -n "$old" ]; then git update-ref -m "publish: undone" HEAD "$old" "$new"; else git update-ref -d HEAD "$new"; fi >> "$LOG" 2>&1 < /dev/null \
+      && fail "The new commit $undo, so $where was moved back to the commit before it; nothing was committed. See var/publish.log."
+    fail "The new commit $undo, and $where couldn't be moved back to the commit before it; nothing was pushed. ${old:+Put it back with: git reset --soft ${old:0:7} }(see var/publish.log)."
+  fi
+  committed=1
+fi
+# Git's own index, for the three folders only, to match the commit (whatever else is staged stays staged). Something
+# else can hold its lock for a moment (an editor's background git status, say), so this tries for up to 10 seconds.
+# If git's index still differs from the commit there, a commit made by hand would undo this publish: the status says
+# so, and the next publish unstages them first.
+tries=0
+until git reset -q -- site wp-content backup >> "$LOG" 2>&1 < /dev/null; do
+  tries=$((tries + 1))
+  [ "$tries" -lt "$RESET_TRIES" ] || break
+  sleep "$RESET_WAIT"
+done
+STALE=""
+if ! git diff --cached --quiet --ignore-submodules=all HEAD -- site wp-content backup 2>>"$LOG" < /dev/null; then
+  STALE="this folder's git index is out of date: run \`git reset -q -- site wp-content backup\` before committing anything here."
+  WARNINGS="$(printf '%s\n%s' "Action needed: $STALE" "$WARNINGS" | grep .)"
+  log "Action needed: $STALE"
+fi
+# ending TEXT: how a run that worked ends its message: with a full stop, or with what still needs doing here.
+ending() { if [ -n "$STALE" ]; then printf '%s, but %s' "$1" "$STALE"; else printf '%s.' "$1"; fi; }
+COMMIT="$(git rev-parse HEAD 2>/dev/null || true)"
+
+if [ "$push" = 0 ]; then
+  if [ "$committed" = 1 ]; then finish checking "$(ending "Committed, not pushed (--no-push)")"; fi
+  finish unchanged "$(ending "Nothing has changed since the last publish")"
+fi
+
+# --- push ---
+# ask_live: asks the adapter, once, whether the live site serves this publish (adapter_confirm). Returns 0 when it does;
+# 1 when not yet, and 2 when it couldn't be reached (or the adapter answered anything else), with why saying so, in a
+# few words, on one line. What the confirm prints is kept aside (in the adapter's private folder), not logged yet: a
+# try that is asked again (just after a deploy, the live site's answer to each is "not there yet") would fill the log
+# with lines that read as errors though the publish then goes live. said_live puts the last try's in the log: once the
+# asking ends, live or not, what that try printed (the reason it gave, when the time runs out) is there, as before.
+ask_live() {
+  local rc=0
+  offprint_adapter_call adapter_confirm "$PUBLISH_ID" "$COMMIT" > "$OFFPRINT_ADAPTER_TMP/confirm.out" 2>&1 < /dev/null || rc=$?
+  [ "$OFFPRINT_ADAPTER_ENDED" = returned ] || rc=2   # (one that ended without returning never says live)
+  case "$rc" in
+    0) return 0 ;;
+    1) why="$(printf '%s\n' "$ADAPTER_WHY" | head -n 1 | printable | cut -c1-200)"
+       [ -n "$why" ] || why="it doesn't show it yet"
+       return 1 ;;
+    *) why="it couldn't be reached"; return 2 ;;
+  esac
+}
+said_live() { cat "$OFFPRINT_ADAPTER_TMP/confirm.out" >> "$LOG" 2> /dev/null < /dev/null; rm -f "$OFFPRINT_ADAPTER_TMP/confirm.out"; }
+# hint: sets HINT to the adapter's words for where to look next, after a "hasn't shown it (why)": one line, cut.
+# (Asked in this shell, into the adapter's private folder, so a TERM while it runs stops it like any other call.)
+hint() {
+  offprint_adapter_call adapter_failure_hint > "$OFFPRINT_ADAPTER_TMP/hint.out" 2>> "$LOG" < /dev/null
+  HINT="$(head -c 4096 "$OFFPRINT_ADAPTER_TMP/hint.out" 2>/dev/null | head -n 1 | printable | cut -c1-200)"
+  rm -f "$OFFPRINT_ADAPTER_TMP/hint.out"
+}
+# deploy_and_confirm: the host makes COMMIT live (adapter_deploy), then the live site is asked until it serves it
+# (adapter_confirm), for up to TIMEOUT seconds; the publish ends there, whichever way. Nothing is undone when either
+# fails: the commit stays, and stays on GitHub, and the status says exactly which step failed, as "COMMIT is pushed,
+# but ...": true whether this run pushed it or an earlier one did (a run with nothing new deploys again). A site with
+# no host (the adapter none) has nothing to wait for: it ends "saved", committed and pushed.
+deploy_and_confirm() {
+  [ "$ADAPTER_NAME" = none ] || status deploying "Waiting for $SITE_PUBLIC_HOST to serve ${COMMIT:0:7}"
+  deploy_rc=0
+  offprint_adapter_call adapter_deploy "$COMMIT" >> "$LOG" 2>&1 < /dev/null || deploy_rc=$?
+  if [ "$OFFPRINT_ADAPTER_ENDED" != returned ]; then
+    # An exit 0 there is no success: the commit stays, and stays on GitHub, and the publish says how it ended.
+    fail "${COMMIT:0:7} is pushed, but the deploy failed: adapter_deploy ended without returning (an exit, or an error); see var/publish.log"
+  fi
+  if [ "$deploy_rc" -ne 0 ]; then
+    # The commit stays, and stays on GitHub: nothing is undone, and the status says exactly that.
+    reason="$(printf '%s\n' "$ADAPTER_PROBLEM" | head -n 1 | printable | cut -c1-300)"
+    fail "${COMMIT:0:7} is pushed, but the deploy failed: ${reason:-the adapter gave no reason (see var/publish.log)}"
+  fi
+  end=$((SECONDS + TIMEOUT))
+  while ! ask_live; do
+    [ "$SECONDS" -lt "$end" ] || { said_live; hint; fail "${COMMIT:0:7} is pushed, but the live site hasn't shown it after $TIMEOUT seconds ($why)$HINT"; }
+    sleep "$POLL"
+  done
+  said_live
+  [ "$ADAPTER_NAME" != none ] || finish saved "$(ending "Committed and pushed ${COMMIT:0:7}; this site has no host set up (site.json \"adapter\")")"
+  finish live "The site is live at ${COMMIT:0:7}${STALE:+, but $STALE}"
+}
+# GitHub again: it may have moved since the check before the export. (The push itself would refuse too.)
+check_github
+if [ -n "$remote_main" ]; then
+  unpushed="$(git rev-list --count origin/main..HEAD)"
+else
+  log "GitHub has no main branch yet; this publish creates it"
+  unpushed="$(git rev-list --count HEAD)"
+fi
+if [ "$committed" = 0 ] && [ "$unpushed" = 0 ]; then
+  # GitHub has everything, but the host may not have made it live (its deploy failed, say): the live site must serve
+  # this publish too before it is "unchanged". Asked once.
+  lrc=0; ask_live || lrc=$?; said_live
+  # A host the publish deploys to itself (ADAPTER_DEPLOY_AGAIN 1) is deployed to again: only that can mend a deploy that
+  # failed (and, before its first deploy has worked, the live site can't be reached at all). Then the live site is asked
+  # as after any deploy. (GitHub already has the commit: nothing is pushed.)
+  if [ "$lrc" != 0 ] && [ "$ADAPTER_DEPLOY_AGAIN" = 1 ]; then
+    log "the live site doesn't serve ${COMMIT:0:7} ($why); the adapter deploys it again (ADAPTER_DEPLOY_AGAIN)"
+    deploy_and_confirm
+  fi
+  if [ "$lrc" = 2 ]; then
+    fail "GitHub has ${COMMIT:0:7}, but the live site couldn't be reached to confirm it serves that (see var/publish.log); publish again in a minute."
+  elif [ "$lrc" != 0 ]; then
+    hint; fail "GitHub has ${COMMIT:0:7}, but the live site hasn't shown it ($why)$HINT"
+  fi
+  # A site with no host (the adapter none) has no live site to be unchanged on, which the admin bar would show as Live:
+  # it ends "saved", as its first publish did.
+  [ "$ADAPTER_NAME" != none ] || finish saved "$(ending "Nothing has changed since the last publish; this site has no host set up (site.json \"adapter\")")"
+  finish unchanged "$(ending "Nothing has changed since the last publish")"
+fi
+
+# --- the repo holds the database dump (drafts, password hashes) and every upload: it must be private ---
+gh_repo=""
+origin_url="$(git remote get-url origin 2>/dev/null || true)"
+case "$origin_url" in
+  git@github.com:*|ssh://git@github.com/*|https://github.com/*) gh_repo="${origin_url#*github.com[:/]}"; gh_repo="${gh_repo%.git}" ;;
+esac
+if ! command -v "$GH" >/dev/null 2>&1; then
+  warn "Warning: couldn't confirm that the GitHub repo is private (gh is not installed)"
+else
+  # In the background, so a gh that hangs (waiting on the network, or on a keychain prompt nobody sees under launchd)
+  # is stopped after GH_TIMEOUT seconds; that counts as no answer.
+  ( GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 exec "$GH" repo view ${gh_repo:+"$gh_repo"} --json visibility -q .visibility ) \
+    > "$VAR/gh.out" 2> "$VAR/gh.err" < /dev/null &
+  ghpid=$!
+  waited=0
+  while kill -0 "$ghpid" 2>/dev/null && [ "$waited" -lt $((GH_TIMEOUT * 10)) ]; do sleep 0.1; waited=$((waited + 1)); done
+  if kill -0 "$ghpid" 2>/dev/null; then
+    kill "$ghpid" 2>/dev/null; wait "$ghpid" 2>/dev/null; ghpid=""
+    warn "Warning: couldn't confirm that the GitHub repo is private (gh didn't answer within $GH_TIMEOUT seconds)"
+  else
+    grc=0; wait "$ghpid" || grc=$?; ghpid=""
+    visibility="$(head -n 1 "$VAR/gh.out" 2>/dev/null | tr -d '\r')"
+    if [ "$grc" -ne 0 ] || [ -z "$visibility" ]; then
+      why="$(grep -m1 . "$VAR/gh.err" | printable | cut -c1-200)"
+      warn "Warning: couldn't confirm that the GitHub repo is private (gh couldn't answer: ${why:-no reason given})"
+    elif [ "$visibility" != PRIVATE ]; then
+      rm -f "$VAR/gh.out" "$VAR/gh.err"
+      fail "The GitHub repo is not private; nothing was pushed."
+    fi
+  fi
+  rm -f "$VAR/gh.out" "$VAR/gh.err"
+fi
+status pushing "Pushing ${COMMIT:0:7} to GitHub"
+git push origin main >> "$LOG" 2>&1 < /dev/null || fail "Pushing to GitHub failed; the commit is saved here and the next publish will try again"
+
+# --- the host makes it live (adapter_deploy), then the live site is asked until it serves it (adapter_confirm) ---
+deploy_and_confirm

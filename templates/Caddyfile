@@ -1,0 +1,18 @@
+# TLS terminates here with the mkcert certificate (made by offprint setup-wp);
+# WordPress is plain HTTP behind it. OFFPRINT_LOCAL_HOST is the site's local_host: templates/compose.yaml
+# gives it to Caddy, from site.json through offprint compose.
+{
+	auto_https off
+}
+
+http://{$OFFPRINT_LOCAL_HOST} {
+	redir https://{$OFFPRINT_LOCAL_HOST}{uri} permanent
+}
+
+https://{$OFFPRINT_LOCAL_HOST} {
+	tls /certs/local.pem /certs/local-key.pem
+	encode zstd gzip
+	reverse_proxy wordpress:80 {
+		header_up X-Forwarded-Proto https
+	}
+}

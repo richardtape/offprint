@@ -1,0 +1,169 @@
+#!/bin/bash
+# Run by launchd (the site's agent, installed by offprint install-agent) when anything in the site's var/inbox
+# changes, and every five minutes anyway. WordPress asks for a publish by writing var/inbox/publish-request;
+# this takes the request and runs bin/publish for the site.
+#   offprint agent
+# It works in the site folder (OFFPRINT_SITE, which the agent's plist sets; or else the one holding site.json at or
+# above where it starts), and runs bin/publish with OFFPRINT_SITE set to it. It needs only that folder, not
+# site.json's values, so not php.
+# - A request is taken by moving it to var/publish-waiting, where it stays until a publish has run for it.
+#   WordPress reads var/ (read-only), so it shows that request as waiting too.
+# - When bin/publish says another publish holds the lock (exit 75), it tries again every 30 seconds, for up
+#   to 35 minutes (bin/publish calls a lock stale after 30), then leaves the request waiting for its next
+#   start. Those refused starts are not runs.
+# - A request written during a run means one more run afterwards, however many were written. At most 10
+#   runs per start, so a stream of requests can't keep it going forever; what is left waits for the next.
+# - One line per request in var/publish.log. With nothing waiting, it changes nothing (except removing
+#   WordPress's temporary files left in the inbox for over 10 minutes).
+#
+# var/inbox is the only folder WordPress can write to on this Mac (besides var/export and wp-content), so
+# nothing in it is trusted, and nothing is ever written into it: the request is moved out before it is
+# looked at (a rename never follows a link), then it must be a plain file of at most 1 KB, and only its first
+# 200 bytes are read, as data. A link, a folder, anything else or anything bigger is removed and logged, and
+# nothing runs. Other files in the inbox are never run.
+#   PUBLISH_AGENT_PUBLISH           a bash script to run (with /bin/bash) instead of bin/publish (tests/agent.test.sh uses a
+#                                   stand-in)
+#   PUBLISH_AGENT_BACKOFF_SECONDS   how long to wait while another publish holds the lock (default 30)
+#   PUBLISH_AGENT_BUSY_MAX_SECONDS  how long to keep waiting for it (default 2100, 35 minutes)
+#   PUBLISH_AGENT_MIN_SECONDS       the shortest it stays, watching for requests (default 11; see below)
+#   PUBLISH_AGENT_SETTLE_SECONDS    how long to let a request settle before taking it (default 2)
+# Needs bash 3.2 (macOS) or newer.
+set -u
+# lib/site.sh first, found by the shell's own builtins: it makes the PATH safe to use before anything is looked up on it
+# (launchd runs this with its plist's PATH: the same clean-up applies to that).
+case "${BASH_SOURCE[0]}" in */*) here="${BASH_SOURCE[0]%/*}" ;; *) here=. ;; esac
+. "$here/../lib/site.sh" || exit 2
+offprint_find_site
+cd "$SITE" || exit 1
+export OFFPRINT_SITE="$SITE"
+VAR="$SITE/var"; INBOX="$VAR/inbox"; REQUEST="$VAR/inbox/publish-request"; LOG="$VAR/publish.log"
+# In var/, which WordPress can only read: where a request from the inbox is checked, and where a good one
+# waits until a publish has run for it.
+TAKEN="$VAR/.publish-request.taken"
+WAITING="$VAR/publish-waiting"
+PUBLISH="${PUBLISH_AGENT_PUBLISH:-$TOOL/bin/publish}"
+BUSY=75   # bin/publish's exit code when another publish holds the lock
+BACKOFF="${PUBLISH_AGENT_BACKOFF_SECONDS:-30}"
+BUSY_MAX="${PUBLISH_AGENT_BUSY_MAX_SECONDS:-2100}"
+# launchd won't start a job again sooner than its ThrottleInterval (10 seconds, in the plist) after it last
+# started. Staying a little longer, and looking for a request until the very end, means a request written
+# meanwhile is taken here instead of waiting on launchd.
+MIN_SECONDS="${PUBLISH_AGENT_MIN_SECONDS:-11}"
+# One save in the block editor can ask twice in a second (the post, then its meta boxes); a short wait
+# before taking a request makes that one run instead of two.
+SETTLE="${PUBLISH_AGENT_SETTLE_SECONDS:-2}"
+MAX_RUNS=10
+
+now() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
+log() { printf '%s agent: %s\n' "$(now)" "$*" >> "$LOG"; }
+
+# parse LINE: "<UTC time> <reason>" into $asked and $reason; only a time of exactly that shape, and only
+# [a-z0-9 _-] of the reason.
+parse() {
+  local line="$1"
+  asked="${line%% *}"
+  case "$asked" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z)
+      case "$line" in *" "*) reason="${line#* }" ;; *) reason="" ;; esac ;;
+    *) asked=""; reason="$line" ;;
+  esac
+  reason="$(printf '%s' "$reason" | LC_ALL=C tr -cd 'a-z0-9 _-' | cut -c1-100)"
+  [ -n "$reason" ] || reason="unknown"
+}
+
+# take: moves the request out of the inbox and checks it. A good one becomes var/publish-waiting (its time
+# and cleaned reason, nothing else) and take returns 0; anything else is removed, logged in one line, and
+# take returns 1. Either way the inbox no longer has it, so a request written from now on is a new one.
+take() {
+  local why=""
+  rm -rf "$TAKEN"
+  if ! mv -f "$REQUEST" "$TAKEN" 2>/dev/null; then
+    log "couldn't take var/inbox/publish-request; nothing ran"
+    return 1
+  fi
+  if [ -L "$TAKEN" ]; then
+    why="a symlink"
+  elif [ -z "$(find "$TAKEN" -maxdepth 0 -type f 2>/dev/null)" ]; then
+    why="not a plain file"
+  elif [ -z "$(find "$TAKEN" -maxdepth 0 -type f -size -1025c 2>/dev/null)" ]; then
+    why="larger than 1 KB"
+  fi
+  if [ -n "$why" ]; then
+    rm -rf "$TAKEN"   # on a link, the link itself; a folder's contents are removed, never followed
+    log "var/inbox/publish-request was $why, so it was removed and nothing ran"
+    return 1
+  fi
+  parse "$(head -c 200 "$TAKEN" | head -n 1)"
+  # A new file, not the taken one rewritten (that could be a hard link to another file in the inbox).
+  rm -f "$TAKEN"
+  printf '%s\n' "${asked:+$asked }$reason" > "$TAKEN" && mv -f "$TAKEN" "$WAITING"
+  rm -f "$TAKEN"
+  [ -f "$WAITING" ]
+}
+
+mkdir -p "$VAR"
+# WordPress writes the request beside it first, then renames it into place; one that failed may be left.
+if [ -d "$INBOX" ] && [ ! -L "$INBOX" ]; then
+  find "$INBOX" -maxdepth 1 -type f -name '.publish-request.*' -mmin +10 -exec rm -f {} + 2>/dev/null
+fi
+start=$SECONDS
+runs=0
+busy_since=""
+while :; do
+  if [ -L "$INBOX" ]; then
+    if ! rm -f "$INBOX" 2>/dev/null || [ -L "$INBOX" ]; then
+      log "var/inbox is a symlink that couldn't be removed; nothing ran. Remove it by hand."
+      exit 1
+    fi
+    log "var/inbox was a symlink, so it was removed and nothing ran"
+    continue
+  fi
+  if [ -f "$WAITING" ]; then
+    if [ "$runs" -ge "$MAX_RUNS" ]; then
+      log "stopping after $MAX_RUNS runs in a row; the request waiting now is left for the next start"
+      break
+    fi
+    parse "$(head -c 200 "$WAITING" | head -n 1)"
+    [ -n "$busy_since" ] || log "publishing (asked${asked:+ at $asked}: $reason)"
+    # bin/publish writes its own progress to the log; its error output may hold what it couldn't log.
+    err="$(mktemp "${TMPDIR:-/tmp}/offprint-publish-agent.XXXXXX")" || err=/dev/null
+    rc=0
+    /bin/bash "$PUBLISH" > /dev/null 2> "$err" < /dev/null || rc=$?
+    if [ "$rc" -eq "$BUSY" ]; then
+      # Another publish holds the lock (one started by hand, say). The request stays where it is, touched so
+      # WordPress can see this is still trying, and this tries again later. Not a run.
+      touch "$WAITING"
+      if [ -z "$busy_since" ]; then
+        busy_since=$SECONDS
+        log "a publish is already running; trying again every $BACKOFF seconds, for up to $((BUSY_MAX / 60)) minutes"
+      fi
+      if [ $((SECONDS - busy_since)) -ge "$BUSY_MAX" ]; then
+        log "giving up for now: the other publish has held the lock for $((BUSY_MAX / 60)) minutes; the request waits in var/publish-waiting for the next start"
+        [ "$err" = /dev/null ] || rm -f "$err"
+        break
+      fi
+      [ "$err" = /dev/null ] || rm -f "$err"
+      sleep "$BACKOFF"
+      continue
+    fi
+    [ -s "$err" ] && cat "$err" >> "$LOG"
+    [ "$err" = /dev/null ] || rm -f "$err"
+    rm -f "$WAITING"
+    busy_since=""
+    runs=$((runs + 1))
+    continue
+  fi
+  if [ -e "$REQUEST" ] || [ -L "$REQUEST" ]; then
+    if [ "$runs" -ge "$MAX_RUNS" ]; then
+      log "stopping after $MAX_RUNS runs in a row; the request waiting now is left for the next start"
+      break
+    fi
+    sleep "$SETTLE"
+    # A refused request counts as a run, so a stream of them can't keep this going either.
+    take || runs=$((runs + 1))
+    continue
+  fi
+  [ $((SECONDS - start)) -ge "$MIN_SECONDS" ] && break
+  sleep 1
+done
+exit 0

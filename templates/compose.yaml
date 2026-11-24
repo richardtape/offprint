@@ -1,0 +1,96 @@
+# WordPress for one Offprint site. Runs only on this Mac; reachable only at https://<the site's local_host>
+# (its local_ip4 and local_ip6, set up by the host set-up, relayed to Caddy). Nothing is published on
+# 0.0.0.0. The database credentials are throwaway values for a database no one else can reach.
+# Run it through `offprint compose` (lib/site.sh's dc), never bare: that names the compose project after the
+# site (no name here, so two sites are two projects), makes the site folder the project directory (so every
+# ./ path below is the site's), and sets the OFFPRINT_* values from the site's site.json. First it checks that a
+# project of that name, if there is one, is this site folder's own: its containers made from this folder, and its
+# volumes (and any volume with the name one of the two below would get) labelled offprint: "1" and with this
+# project's compose label, as the two below are.
+
+services:
+  db:
+    image: mariadb:11
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: wordpress
+      MARIADB_USER: wordpress
+      MARIADB_PASSWORD: wordpress
+      MARIADB_RANDOM_ROOT_PASSWORD: "1"
+    volumes:
+      - db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  wordpress:
+    build: "${OFFPRINT_TOOL:?set by offprint compose}/templates/wordpress"
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_NAME: wordpress
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: wordpress
+      # Caddy terminates TLS, so tell WordPress the request was HTTPS (no redirect loop).
+      # $$ is a literal $ for compose. OFFPRINT_PUBLIC_ORIGIN is site.json's public_url, which lib/config.php
+      # only lets through as https://hostname, so it is safe inside the PHP string.
+      WORDPRESS_CONFIG_EXTRA: |
+        if ( isset( $$_SERVER['HTTP_X_FORWARDED_PROTO'] ) && 'https' === $$_SERVER['HTTP_X_FORWARDED_PROTO'] ) {
+            $$_SERVER['HTTPS'] = 'on';
+        }
+        define( 'OFFPRINT_PUBLIC_ORIGIN', '${OFFPRINT_PUBLIC_ORIGIN:?set by offprint compose}' );
+        define( 'DISALLOW_FILE_EDIT', true );
+    volumes:
+      - wordpress:/var/www/html
+      - ./wp-content:/var/www/html/wp-content
+      - ./var/export:/var/www/export
+      # Shared with the Mac (see the plugin's Request and Admin_Bar classes, and bin/publish-agent). WordPress reads
+      # status.json, which bin/publish writes, through a read-only mount: bin/publish and launchd write
+      # var/ by path, so WordPress must not be able to put anything there. It asks for a publish by
+      # writing publish-request into var/inbox, the only folder of var/ it can write.
+      - ./var:/var/www/publish:ro
+      - ./var/inbox:/var/www/publish-inbox
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -o /dev/null http://localhost/"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - wordpress
+    # Docker Desktop cannot publish a port below 1024 on one loopback address (it binds
+    # 0.0.0.0:443 instead, which Valet's nginx holds). So Caddy listens on high ports (site.json's
+    # tls_port and http_port) on 127.0.0.1 only, and the host set-up makes launchd relay the site's
+    # local_ip4 and local_ip6, ports 443 and 80, to them.
+    ports:
+      - "127.0.0.1:${OFFPRINT_TLS_PORT:?set by offprint compose}:443"
+      - "127.0.0.1:${OFFPRINT_HTTP_PORT:?set by offprint compose}:80"
+    environment:
+      OFFPRINT_LOCAL_HOST: "${OFFPRINT_LOCAL_HOST:?set by offprint compose}"
+    volumes:
+      # The tool's Caddyfile, in the long form: the tool's folder may have a colon in its path, which the short
+      # form would read as a separator.
+      - type: bind
+        source: "${OFFPRINT_TOOL:?set by offprint compose}/templates/Caddyfile"
+        target: /etc/caddy/Caddyfile
+        read_only: true
+      - ./local/certs:/certs:ro
+
+# Every named volume is labelled offprint: "1". lib/site.sh's dc refuses to run when a volume of the project, or one
+# with the name compose gives one of these (NAME_db, NAME_wordpress), lacks that label or this project's compose label:
+# it was made by something else and holds its data (see offprint_own_project; OFFPRINT_VOLUMES there lists these).
+volumes:
+  db:
+    labels:
+      offprint: "1"
+  wordpress:
+    labels:
+      offprint: "1"

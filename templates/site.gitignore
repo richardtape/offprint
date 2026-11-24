@@ -1,0 +1,17 @@
+.DS_Store
+# Every other pattern is anchored to the site folder's root (a leading /). site/ and wp-content/ are committed whole,
+# so a name that is fine deep inside them (a plugin's vendor/, a CA bundle's .pem, a theme's build.json)
+# must not be dropped; offprint publish refuses to commit if anything there would be left out.
+# never commit private keys or tokens
+/*.pem
+/*.key
+/.env
+# the local WordPress (see Offprint's templates/compose.yaml)
+/local/certs/
+/var/
+/wp-content/upgrade/
+/wp-content/upgrade-temp-backup/
+/wp-content/cache/
+/wp-content/debug.log
+/site.new/
+/site.old/

@@ -1,0 +1,48 @@
+/*
+ * The "Publish Site" node in the admin bar: a dot (green live, amber publishing or asked, red failed or
+ * stuck, grey otherwise), long lines wrapped, and the button. Printed inline by Offprint\Admin_Bar.
+ */
+#wpadminbar .offprint-dot {
+	display: inline-block;
+	width: 8px;
+	height: 8px;
+	margin-inline-end: 6px;
+	border-radius: 50%;
+	background: #a7aaad;
+	vertical-align: middle;
+}
+
+#wpadminbar .offprint-live .offprint-dot {
+	background: #00ba37;
+}
+
+#wpadminbar .offprint-busy .offprint-dot {
+	background: #f0c33c;
+}
+
+#wpadminbar .offprint-failed .offprint-dot {
+	background: #f86368;
+}
+
+#wpadminbar #wp-admin-bar-offprint .offprint-line .ab-item {
+	height: auto;
+	width: max-content;
+	max-width: 32em;
+	padding-top: 3px;
+	padding-bottom: 3px;
+	line-height: 1.5;
+	white-space: normal;
+}
+
+#wpadminbar #wp-admin-bar-offprint .offprint-button {
+	background: none;
+	border: 0;
+	color: inherit;
+	cursor: pointer;
+	font: inherit;
+}
+
+#wpadminbar #wp-admin-bar-offprint .offprint-button:hover,
+#wpadminbar #wp-admin-bar-offprint .offprint-button:focus {
+	color: #72aee6;
+}

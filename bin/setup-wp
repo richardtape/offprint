@@ -1,0 +1,235 @@
+#!/bin/bash
+# Makes the site's local WordPress at https://<local_host in site.json>. Safe to run again.
+#   offprint setup-wp
+# Run from inside the site folder (or with OFFPRINT_SITE set to it), after offprint host-setup (sudo). The admin user
+# name and email address come from WP_ADMIN_USER and WP_ADMIN_EMAIL, or are asked for; the password is asked for,
+# never stored (for a non-interactive run set WP_ADMIN_PASSWORD too). The site's title is WP_TITLE, or the site's
+# name from site.json.
+# It then takes away the two traps of a first publish, saying one line for each. On a WordPress this run installed
+# (WP-CLI said "Success:"; not one it found installed), WordPress's Sample Page, which links to /wp-admin/ (the export
+# checks refuse that), is deleted when it is post 2 and was never changed. And on any run, the plugin, which a publish
+# wants committed, is committed alone, as "Offprint's plugin", when HEAD doesn't have it yet, the site folder is the top
+# of its git repository, nothing is staged and git has an identity (else what to do is said). What is committed is built
+# from the tool's own plugin/, never from the copy in wp-content/, which WordPress can write: when the copy differs from
+# the commit, that is said (a publish refuses until it matches). A plugin in HEAD that isn't this Offprint's (an older
+# one) is left as it is: replacing it is the owner's decision, and the command that would is said.
+set -euo pipefail
+# git finds the repository from the site folder, and only from there: these variables would send it elsewhere (git
+# exports GIT_DIR inside any hook), past the check that the site folder is the top of its own repository.
+unset GIT_DIR GIT_WORK_TREE GIT_IMPLICIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_PREFIX GIT_GRAFT_FILE GIT_SHALLOW_FILE
+# lib/site.sh first, found by the shell's own builtins: it makes the PATH safe to use before anything is looked up on it.
+case "${BASH_SOURCE[0]}" in */*) here="${BASH_SOURCE[0]%/*}" ;; *) here=. ;; esac
+. "$here/../lib/site.sh" || exit 2
+offprint_find_site
+offprint_load_site
+cd "$SITE"
+export OFFPRINT_SITE="$SITE"   # for bin/wp, which finds the site again (this folder, whatever it was given)
+wp_cli() { /bin/bash "$TOOL/bin/wp" "$@"; }
+# The compose project named in site.json must be this site folder's own (lib/site.sh), before anything is written or
+# started: otherwise this would start, and change the options of, the WordPress of whatever project has that name.
+# It stops here, too, when Docker isn't running.
+offprint_require_project
+
+command -v mkcert >/dev/null || { echo "mkcert is not installed: brew install mkcert"; exit 1; }
+[ -f "$(mkcert -CAROOT)/rootCA.pem" ] || { echo "mkcert's local CA is not made or trusted yet: run  mkcert -install  and then this again"; exit 1; }
+
+mkdir -p local/certs var/export var/inbox wp-content
+if [ ! -f local/certs/local.pem ] || [ ! -f local/certs/local-key.pem ]; then
+  mkcert -cert-file local/certs/local.pem -key-file local/certs/local-key.pem "$SITE_LOCAL_HOST"
+fi
+# The site's copy of the plugin, until a version pin and `offprint upgrade` look after it.
+if [ ! -f wp-content/mu-plugins/offprint.php ]; then
+  mkdir -p wp-content/mu-plugins
+  cp -R "$TOOL/plugin/offprint.php" "$TOOL/plugin/offprint" wp-content/mu-plugins/
+fi
+
+dc up -d --build --wait db wordpress
+dc up -d caddy
+
+nl='
+'
+tab="$(printf '\t')"
+installed_now=0
+if wp_cli core is-installed 2>/dev/null; then
+  echo "WordPress is already installed."
+else
+  user="${WP_ADMIN_USER:-}"
+  email="${WP_ADMIN_EMAIL:-}"
+  title="${WP_TITLE:-$SITE_NAME}"
+  if [ -z "$user" ]; then
+    read -r -p "Admin user name: " user || true
+    [ -n "$user" ] || { echo "an admin user name is needed (or set WP_ADMIN_USER)"; exit 1; }
+  fi
+  if [ -z "$email" ]; then
+    read -r -p "Admin email address: " email || true
+    [ -n "$email" ] || { echo "an admin email address is needed (or set WP_ADMIN_EMAIL)"; exit 1; }
+  fi
+  if [ -z "${WP_ADMIN_PASSWORD:-}" ]; then
+    read -r -s -p "Admin password for $user: " WP_ADMIN_PASSWORD; echo
+    [ -n "$WP_ADMIN_PASSWORD" ] || { echo "a password is needed"; exit 1; }
+  fi
+  # The password goes in through the environment (the -e names it, with no value), so it
+  # is not in any process arguments.
+  export WP_ADMIN_PASSWORD
+  # What WP-CLI says is shown, and read: only an install that says "Success:" installed WordPress (on one that is
+  # installed already, wp core install says "WordPress is already installed." and succeeds).
+  rc=0
+  said="$(dc exec -T -u www-data -e WP_ADMIN_PASSWORD wordpress \
+    sh -c 'wp core install --url="$1" --title="$2" --admin_user="$3" --admin_email="$4" --admin_password="$WP_ADMIN_PASSWORD" --skip-email' \
+    _ "https://$SITE_LOCAL_HOST" "$title" "$user" "$email")" || rc=$?
+  [ -z "$said" ] || printf '%s\n' "$said"
+  [ "$rc" = 0 ] || exit "$rc"
+  case "$nl$said" in *"${nl}Success:"*) installed_now=1 ;; esac
+fi
+
+wp_cli option update home "https://$SITE_LOCAL_HOST" >/dev/null
+wp_cli option update siteurl "https://$SITE_LOCAL_HOST" >/dev/null
+wp_cli rewrite structure '/%postname%/' --hard >/dev/null
+wp_cli option update default_comment_status closed >/dev/null
+wp_cli option update default_ping_status closed >/dev/null
+wp_cli option update blog_public 1 >/dev/null
+
+# untouched_sample_page: 0 when post 2 is WordPress's Sample Page, never changed: a page, with the slug sample-page, whose
+# post_date is its post_modified. What WP-CLI says is read as JSON, as data. (stdin /dev/null: bin/wp then asks for no
+# terminal, which would end each line with a CR.)
+untouched_sample_page() {
+  local info
+  info="$(wp_cli post get 2 --fields=post_type,post_name,post_date,post_modified --format=json < /dev/null 2> /dev/null)" || return 1
+  printf '%s' "$info" | php -r '
+    $j = json_decode((string) stream_get_contents(STDIN), true);
+    exit(is_array($j) && ($j["post_type"] ?? null) === "page" && ($j["post_name"] ?? null) === "sample-page"
+      && is_string($j["post_date"] ?? null) && $j["post_date"] !== "" && $j["post_date"] === ($j["post_modified"] ?? null) ? 0 : 1);'
+}
+if [ "$installed_now" = 1 ]; then
+  if untouched_sample_page; then
+    if wp_cli post delete 2 --force < /dev/null > /dev/null 2>&1; then
+      echo "Deleted WordPress's Sample Page (post 2, never changed): it links to /wp-admin/, which the export checks refuse."
+    else
+      echo "Couldn't delete WordPress's Sample Page (post 2), which links to /wp-admin/ (the export checks refuse that): offprint wp post delete 2 --force"
+    fi
+  else
+    echo "No untouched Sample Page to delete (post 2 isn't a page with the slug sample-page that was never changed)."
+  fi
+fi
+
+# --- the plugin, committed ---
+# Every git call here: WordPress can write wp-content/ and var/export, and a git repository it plants there names, in
+# its own config, commands git runs when it looks inside (core.fsmonitor, run by a status). None may run. Nor may a
+# .gitattributes WordPress writes (a plugin's own, say) change how files are stored (line endings, filters): where
+# this git has --attr-source, attributes come from the empty tree instead of the files on disk, so only the owner's
+# own (.git/info/attributes, core.attributesFile) apply. Hooks are the owner's own, so they are left alone.
+ATTR_SOURCE=""
+empty_tree="$(command git -c core.fsmonitor=false hash-object -t tree /dev/null 2>/dev/null)" || empty_tree=""
+if [ -n "$empty_tree" ] && command git --attr-source="$empty_tree" -c core.fsmonitor=false check-attr -a -- probe > /dev/null 2>&1; then
+  ATTR_SOURCE="--attr-source=$empty_tree"
+fi
+git() { command git -c core.fsmonitor=false ${ATTR_SOURCE:+"$ATTR_SOURCE"} "$@"; }
+
+plugin_paths="wp-content/mu-plugins/offprint.php wp-content/mu-plugins/offprint"
+again="run offprint setup-wp again to commit it"
+# printable: control characters (other than line ends) as "?", for what goes into a message.
+printable() { LC_ALL=C tr '\001-\011\013-\037\177' '?'; }
+first_line() { printf '%s\n' "$1" | head -n 1 | printable; }
+# put_back LIST: the tool's files (LIST: offprint_plugin_list's lines) taken out of git's index again.
+put_back() { printf '%s\n' "$1" | cut -f2 | git update-index --force-remove --stdin > /dev/null 2>&1; }
+# no_tool_list: the one line saying why the tool's plugin couldn't be listed (offprint_plugin_list's
+# OFFPRINT_PLUGIN_PROBLEM), and what to do.
+no_tool_list() {
+  case "$OFFPRINT_PLUGIN_PROBLEM" in
+    "odd "*) echo "The plugin copy wasn't committed: this Offprint's plugin folder holds something that is neither a file nor a folder ($(first_line "${OFFPRINT_PLUGIN_PROBLEM#odd }")). Once that is put right, $again." ;;
+    "git "*) echo "Couldn't commit the plugin copy (git said: $(first_line "${OFFPRINT_PLUGIN_PROBLEM#git }")); once that is put right, $again." ;;
+    *) echo "The plugin copy wasn't committed: this Offprint's plugin folder couldn't be read ($(first_line "$TOOL/plugin")). Once it can, $again." ;;
+  esac
+}
+# commit_plugin: this Offprint's plugin committed alone, as "Offprint's plugin" (exactly the two paths), or one line
+# saying why not and what to do. The commit is built from the tool's own plugin/, never from the copy in wp-content/,
+# which WordPress can write: each file's bytes as they are (hash-object --no-filters), put into git's index by
+# update-index --cacheinfo, so nothing on disk there is staged, read through a filter, or taken for a repository. It
+# never fails: WordPress is made either way, and on any failure git's index is put back as it was.
+commit_plugin() {
+  local top line mode rest hash tool_list="" written="" head_list="" in_head="" p said before now differs n shown
+  local -a args
+  if ! top="$(git rev-parse --show-toplevel 2> /dev/null < /dev/null)" || [ -z "$top" ] || [ ! "$top" -ef "$SITE" ]; then
+    echo "The plugin copy wasn't committed: the site folder isn't the top of a git repository (a publish needs it to be). Once it is, $again."
+    return 0
+  fi
+  # The tool's plugin (lib/site.sh: offprint.php, and every file under offprint/ but Finder's .DS_Store, which a site's
+  # .gitignore leaves out, so a git add of the copy would too; anything in it that is neither a file nor a folder, a
+  # link say, is refused: what it leads to isn't the tool's to commit), as git ls-tree -r lists it (but for the type):
+  # mode, hash, path. bin/publish refuses a commit whose plugin isn't exactly this.
+  if ! offprint_plugin_list tool_list; then no_tool_list; return 0; fi
+  if git rev-parse -q --verify HEAD > /dev/null 2>&1 < /dev/null; then
+    # shellcheck disable=SC2086 # the two paths
+    if ! head_list="$(git ls-tree -r --full-tree HEAD -- $plugin_paths 2>&1 < /dev/null)"; then
+      echo "Couldn't commit the plugin copy (git said: $(first_line "$head_list")); once that is put right, $again."
+      return 0
+    fi
+    head_list="$(printf '%s\n' "$head_list" | sed 's/^\([0-7]*\) [a-z]* /\1 /' | LC_ALL=C sort)"
+  fi
+  if [ -n "$head_list" ]; then
+    if [ "$head_list" = "$tool_list" ]; then
+      echo "The plugin copy is committed already."
+      return 0
+    fi
+    # (an upgrade is the owner's decision: the command takes the old copy out, and setup-wp then commits this one)
+    for p in $plugin_paths; do
+      [ -z "$(git ls-tree --full-tree HEAD -- "$p" 2> /dev/null < /dev/null)" ] || in_head="${in_head:+$in_head }$p"
+    done
+    echo "The plugin copy in the repository isn't this Offprint's (an older Offprint's, say), so it was left as it is. $(offprint_plugin_replace "${in_head:-$plugin_paths}")"
+    return 0
+  fi
+  if ! git diff --cached --quiet < /dev/null > /dev/null 2>&1; then
+    echo "The plugin copy wasn't committed, as something else is staged; commit or unstage that, then run offprint setup-wp again to commit it alone."
+    return 0
+  fi
+  # (only an identity git has been given: never one it would guess from this Mac's user and host names)
+  if ! git -c user.useConfigOnly=true var GIT_AUTHOR_IDENT > /dev/null 2>&1 < /dev/null \
+     || ! git -c user.useConfigOnly=true var GIT_COMMITTER_IDENT > /dev/null 2>&1 < /dev/null; then
+    echo "The plugin copy wasn't committed: git has no user.name and user.email. Set them (git config), then $again."
+    return 0
+  fi
+  # Each of the tool's files as a blob, then all of them into git's index in one update-index (it changes the index only
+  # once all are taken). Nothing was in the index under the two paths (HEAD has nothing there, and nothing is staged),
+  # so taking exactly these out again puts it back as it was.
+  if ! offprint_plugin_list written -w; then no_tool_list; return 0; fi
+  args=(--add)
+  while IFS= read -r line; do
+    mode="${line%% *}"; rest="${line#* }"; hash="${rest%%"$tab"*}"
+    args[${#args[@]}]=--cacheinfo; args[${#args[@]}]="$mode,$hash,${rest#*"$tab"}"
+  done <<EOF
+$written
+EOF
+  if [ "${#args[@]}" -lt 3 ]; then
+    echo "The plugin copy wasn't committed: this Offprint's plugin folder couldn't be read ($(first_line "$TOOL/plugin")). Once it can, $again."
+    return 0
+  fi
+  before="$(git rev-parse -q --verify HEAD 2> /dev/null < /dev/null)" || before=""
+  if ! said="$(git update-index "${args[@]}" 2>&1 < /dev/null)"; then
+    put_back "$written" || said="$(first_line "$said") (and git's index couldn't be put back as it was: the plugin may be staged)"
+    echo "Couldn't commit the plugin copy (git said: $(first_line "$said")); once that is put right, $again."
+    return 0
+  fi
+  if ! said="$(git -c user.useConfigOnly=true commit -q -m "Offprint's plugin" 2>&1 < /dev/null)"; then
+    now="$(git rev-parse -q --verify HEAD 2> /dev/null < /dev/null)" || now=""
+    # (when git failed after it made the commit, the commit is there, and the index is left in line with it)
+    if [ "$now" = "$before" ]; then
+      put_back "$written" || said="$(first_line "$said") (and git's index couldn't be put back as it was: the plugin is staged)"
+      echo "Couldn't commit the plugin copy (git said: $(first_line "$said")); once that is put right, $again."
+      return 0
+    fi
+  fi
+  echo "Committed this Offprint's plugin as \"Offprint's plugin\" (wp-content/mu-plugins/offprint.php and wp-content/mu-plugins/offprint)."
+  # The copy on disk, against the commit, as a publish compares them (bin/publish refuses while they differ).
+  # shellcheck disable=SC2086 # the two paths
+  differs="$(git status --porcelain --ignore-submodules=all -- $plugin_paths 2> /dev/null < /dev/null)" || differs=""
+  if [ -n "$differs" ]; then
+    n="$(printf '%s\n' "$differs" | wc -l | tr -d ' ')"
+    shown="$(printf '%s\n' "$differs" | head -n 5 | cut -c4- | printable | awk 'NR > 1 { printf ", " } { printf "%s", $0 }')"
+    [ "$n" -le 5 ] || shown="$shown, and $((n - 5)) more"
+    echo "The commit holds this Offprint's own plugin, but the copy on disk differs from it ($shown), so a publish will refuse until the copy matches."
+  fi
+}
+commit_plugin || true
+
+echo "Done: https://$SITE_LOCAL_HOST/  (admin: https://$SITE_LOCAL_HOST/wp-admin/)"

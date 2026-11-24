@@ -1,0 +1,17 @@
+# Used only by tests/e2e.sh, together with templates/compose.yaml, as the project "offprint-e2e".
+# A throwaway WordPress: its own database and files, no ports, and Caddy never started, so the
+# test cannot touch a real site. The paths come from e2e.sh (temporary folders); each replaces
+# the mount templates/compose.yaml has at the same place.
+services:
+  wordpress:
+    restart: "no"
+    # A healthcheck is a normal request every few seconds, which would run cron under the test.
+    healthcheck:
+      disable: true
+    volumes:
+      - ${E2E_WP_CONTENT:?set by tests/e2e.sh}:/var/www/html/wp-content
+      - ${E2E_EXPORT:?set by tests/e2e.sh}:/var/www/export
+      - ${E2E_PUBLISH:?set by tests/e2e.sh}:/var/www/publish:ro
+      - ${E2E_INBOX:?set by tests/e2e.sh}:/var/www/publish-inbox
+  db:
+    restart: "no"

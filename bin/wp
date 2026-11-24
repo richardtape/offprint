@@ -1,0 +1,16 @@
+#!/bin/bash
+# Run WP-CLI inside the site's wordpress container, as www-data:  offprint wp option get siteurl
+# Run from inside the site folder (or with OFFPRINT_SITE set to it). Exits with WP-CLI's (or docker's) exit code.
+# (No bash arrays here: an empty one is an "unbound variable" under set -u on macOS bash 3.2.)
+set -euo pipefail
+# lib/site.sh first, found by the shell's own builtins: it makes the PATH safe to use before anything is looked up on it.
+case "${BASH_SOURCE[0]}" in */*) here="${BASH_SOURCE[0]%/*}" ;; *) here=. ;; esac
+. "$here/../lib/site.sh" || exit 2
+offprint_find_site
+offprint_load_site
+cd "$SITE"
+if [ -t 0 ]; then
+  dc exec -u www-data wordpress wp "$@"
+else
+  dc exec -T -u www-data wordpress wp "$@"
+fi

@@ -1,0 +1,246 @@
+#!/bin/bash
+# Stops anything private or local from going public.
+#   offprint check DIR
+#   CHECK_SITE_HOST=HOST CHECK_SITE_LOCAL_HOST=HOST bin/check-site DIR
+# The site's two hosts come from the environment only, never from a file: CHECK_SITE_HOST is the public host and
+# CHECK_SITE_LOCAL_HOST the local one. Both are required; bin/publish and offprint check set them from site.json.
+# What the site's host adapter needs (lib/adapter.sh) comes from the environment too; bin/publish sets each from it:
+#   CHECK_SITE_RESERVED        names (space-separated) the publish writes at the root itself: the export can't have one,
+#                              in any letter case
+#   CHECK_SITE_ALLOWED         of those, the ones the publish has just written, allowed exactly as written
+#   CHECK_SITE_SPECIAL         names the host gives a meaning of its own at the root of what it is given (an ignore
+#                              file, say): the export can't have one, in any letter case, and none is ever allowed
+#   CHECK_SITE_MAX_BYTES       the most the site may be, gzip-compressed
+#   CHECK_SITE_MAX_FILES       the most files it may have
+#   CHECK_SITE_MAX_FILE_BYTES  the most one file may be
+#   CHECK_SITE_TO_COME         the one file the publish still writes at the root after the check (its id file, which it
+#                              can only write once the check has passed): one of the reserved names, none of the allowed
+#   CHECK_SITE_TO_COME_BYTES   and its size (at most 1048576): the limits count it as if it were there, so they hold for
+#                              what is published (one more file, of that size; in the archive, a stand-in of that size)
+# Each limit is 0 (or unset) for none.
+# Prints one line per failure and exits non-zero if there were any. A warning (from 80% of a limit) goes to stderr.
+# Exits 2, having read nothing, on a missing DIR, a missing or malformed host, or a malformed name or limit.
+# The address checks (links, images, forms, CSS, feeds) are in bin/check-site-addresses.php.
+set -u
+# lib/site.sh first, found by the shell's own builtins: it makes the PATH safe to use before anything is looked up on it
+# (php, below, among others). Of the rest of it, only TOOL is used here.
+case "${BASH_SOURCE[0]}" in */*) here="${BASH_SOURCE[0]%/*}" ;; *) here=. ;; esac
+. "$here/../lib/site.sh" || exit 2
+here="$TOOL/bin"
+dir="${1:-}"
+if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+  echo "usage: offprint check DIR  (or: CHECK_SITE_HOST=HOST CHECK_SITE_LOCAL_HOST=HOST bin/check-site DIR)" >&2; exit 2
+fi
+# need_host NAME VALUE: VALUE must be set and look like a hostname (ASCII letters, digits and dashes, dot-separated, at
+# least one dot; the regular expression is matched in the C locale, so no other letter passes) before any pattern is
+# made from it below, so nothing in it can act as a regular expression or an option.
+hostname_re='^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$'
+need_host() {
+  if [ -z "$2" ]; then
+    echo "bin/check-site needs $1 set (CHECK_SITE_HOST: the public host, CHECK_SITE_LOCAL_HOST: the local one); offprint check sets both from site.json." >&2
+    exit 2
+  fi
+  if [ "${#2}" -gt 253 ] || ! ( LC_ALL=C; [[ $2 =~ $hostname_re ]] ); then
+    echo "bin/check-site: $1 must be a hostname (letters, digits, dashes and dots, like www.example.com)." >&2
+    exit 2
+  fi
+}
+need_host CHECK_SITE_HOST "${CHECK_SITE_HOST:-}"
+need_host CHECK_SITE_LOCAL_HOST "${CHECK_SITE_LOCAL_HOST:-}"
+# need_names NAME VALUE: VALUE must be file names, separated by spaces: letters, digits, dots, dashes and underscores,
+# and not . or .. (checked whole before it is split, so no word can be a wildcard), before any pattern is made from them.
+names_re='^[A-Za-z0-9._ -]*$'
+need_names() {
+  local n bad_names=0
+  if [ "${#2}" -gt 2000 ] || ! ( LC_ALL=C; [[ $2 =~ $names_re ]] ); then bad_names=1
+  else for n in $2; do case "$n" in .|..) bad_names=1 ;; esac; done; fi
+  if [ "$bad_names" = 1 ]; then
+    echo "bin/check-site: $1 must be file names (letters, digits, dots, dashes and underscores), separated by spaces." >&2
+    exit 2
+  fi
+}
+# need_count NAME VALUE: VALUE must be a whole number (no sign, no leading zero, at most 15 digits) before any
+# arithmetic is done with it: bash would run a command named in an array index there.
+count_re='^(0|[1-9][0-9]{0,14})$'
+need_count() {
+  if ! ( LC_ALL=C; [[ $2 =~ $count_re ]] ); then
+    echo "bin/check-site: $1 must be a whole number (0 for no limit)." >&2
+    exit 2
+  fi
+}
+reserved="${CHECK_SITE_RESERVED:-}"; allowed="${CHECK_SITE_ALLOWED:-}"; special="${CHECK_SITE_SPECIAL:-}"
+max_bytes="${CHECK_SITE_MAX_BYTES:-0}"; max_files="${CHECK_SITE_MAX_FILES:-0}"; max_file_bytes="${CHECK_SITE_MAX_FILE_BYTES:-0}"
+need_names CHECK_SITE_RESERVED "$reserved"
+need_names CHECK_SITE_ALLOWED "$allowed"
+need_names CHECK_SITE_SPECIAL "$special"
+need_count CHECK_SITE_MAX_BYTES "$max_bytes"
+need_count CHECK_SITE_MAX_FILES "$max_files"
+need_count CHECK_SITE_MAX_FILE_BYTES "$max_file_bytes"
+# The file to come: one name the publish writes (a reserved one) and hasn't yet (not an allowed one), so no entry by
+# that name can pass the check and nothing is counted twice; its size bounded, since a stand-in of that size is made.
+to_come="${CHECK_SITE_TO_COME:-}"; to_come_bytes="${CHECK_SITE_TO_COME_BYTES:-0}"
+one_name_re='^[A-Za-z0-9._-]+$'
+if [ -n "$to_come" ]; then
+  tc_ok=0
+  if [ "${#to_come}" -le 255 ] && ( LC_ALL=C; [[ $to_come =~ $one_name_re ]] ) && [ "$to_come" != . ] && [ "$to_come" != .. ]; then
+    for n in $reserved; do [ "$n" != "$to_come" ] || tc_ok=1; done
+    for n in $allowed; do [ "$n" != "$to_come" ] || tc_ok=0; done
+  fi
+  if [ "$tc_ok" = 0 ]; then
+    echo "bin/check-site: CHECK_SITE_TO_COME must be one file name, one of CHECK_SITE_RESERVED's and none of CHECK_SITE_ALLOWED's." >&2
+    exit 2
+  fi
+fi
+if ! ( LC_ALL=C; [[ $to_come_bytes =~ $count_re ]] ) || [ "$to_come_bytes" -gt 1048576 ]; then
+  echo "bin/check-site: CHECK_SITE_TO_COME_BYTES must be a whole number of at most 1048576." >&2; exit 2
+fi
+cd "$dir" || exit 2
+fail=0
+bad() { echo "$1"; fail=1; }
+
+for f in index.html 404.html feed/index.xml; do
+  [ -f "$f" ] || bad "missing: $f"
+done
+# A name the publish writes at the root itself (the host adapter's own files, and its host's), in any case (the Mac's
+# disk ignores case, and a host's may): the export can't have one, or it would stand in for the publish's. A file,
+# folder or anything else by that name. Asked two ways: find -iname (letter case in ASCII, on any disk), and the disk's
+# own lookup of the name, which on a disk that ignores case folds it in Unicode too (a long s for an s, the ff ligature
+# for ff); the entry that lookup reaches is named by its inode. Only an entry spelt exactly as a name the publish has
+# just written (CHECK_SITE_ALLOWED) is let by.
+# refuse_root NAMES OURS SAYS: each of NAMES found at the root so is refused, but an entry spelt exactly as one of OURS;
+# the message: SAYS "writes", the publish writes it there; else the host gives it a meaning of its own there.
+refuse_root() {
+  local r found ino l ours a
+  for r in $1; do
+    found="$(find . -mindepth 1 -maxdepth 1 -iname "$r")"
+    if [ -e "./$r" ] || [ -L "./$r" ]; then
+      ino="$(ls -di -- "./$r" 2>/dev/null | awk '{ print $1; exit }')"
+      if [ -n "$ino" ]; then found="$(printf '%s\n%s\n' "$found" "$(find . -mindepth 1 -maxdepth 1 -inum "$ino")" | grep . | LC_ALL=C sort -u)"
+      else found="$(printf '%s\n%s\n' "$found" "./$r" | grep . | LC_ALL=C sort -u)"; fi
+    fi
+    found="$(printf '%s' "$found" | LC_ALL=C tr '\001-\011\013-\037\177' '?')"
+    [ -n "$found" ] || continue
+    while IFS= read -r l; do
+      ours=0
+      for a in $2; do [ "$l" != "./$a" ] || ours=1; done
+      [ "$ours" = 0 ] || continue
+      if [ "$3" = writes ]; then bad "the publish writes $r at the root, so the export can't have one: $l"
+      else bad "the host gives $r a meaning of its own at the root, so the export can't have one: $l"; fi
+    done <<EOT
+$found
+EOT
+  done
+}
+refuse_root "$reserved" "$allowed" writes
+refuse_root "$special" "" special
+
+# Symlinks and control characters in names.
+links="$(find . -type l | LC_ALL=C tr '\001-\011\013-\037\177' '?')"
+if [ -n "$links" ]; then
+  while IFS= read -r l; do bad "symlink: $l"; done <<EOT
+$links
+EOT
+fi
+ctl="$(find . -name '*[[:cntrl:]]*' | LC_ALL=C tr '\001-\011\013-\037\177' '?')"
+if [ -n "$ctl" ]; then
+  while IFS= read -r l; do bad "control character in a file name: $l"; done <<EOT
+$ctl
+EOT
+fi
+
+# Anything git treats as its own, in any case (the Mac's disk ignores case): a .git folder or file makes git see
+# another repository, and run commands its config names; the others change what git does with the files around them.
+gits="$(find . \( -iname .git -o -iname .gitattributes -o -iname .gitmodules -o -iname .gitignore \) -prune -print \
+  | LC_ALL=C tr '\001-\011\013-\037\177' '?')"
+if [ -n "$gits" ]; then
+  while IFS= read -r l; do bad "git file or folder: $l"; done <<EOT
+$gits
+EOT
+fi
+
+# The local address, anywhere, in any file (binary too), any case. The search is built from CHECK_SITE_LOCAL_HOST:
+# every regular-expression character escaped, then each dot (escaped) replaced by a dot or one of its encodings.
+# (Built one character at a time: no sed or ${//} replacement, where & can mean "what matched".)
+dot='(\.|&#0*46;|&#x0*2e;|&period;|%2e)'
+local_re=""; rest="$CHECK_SITE_LOCAL_HOST"
+while [ -n "$rest" ]; do
+  ch="${rest%"${rest#?}"}"; rest="${rest#?}"
+  case "$ch" in
+    .) local_re="$local_re$dot" ;;
+    [][\\^\$*+?\(\){}\|]) local_re="$local_re\\$ch" ;;
+    *) local_re="$local_re$ch" ;;
+  esac
+done
+hits="$(grep -rlaiE -e "$local_re" . 2>/dev/null | LC_ALL=C tr '\001-\011\013-\037\177' '?' | sed 's#^\./##' | sort)"
+if [ -n "$hits" ]; then
+  n="$(printf '%s\n' "$hits" | wc -l | tr -d ' ')"
+  printf '%s\n' "$hits" | head -n 20 | while IFS= read -r l; do echo "contains $CHECK_SITE_LOCAL_HOST: $l"; done
+  [ "$n" -le 20 ] || echo "and $((n - 20)) more files contain $CHECK_SITE_LOCAL_HOST"
+  fail=1
+fi
+
+# Addresses that lead to the admin, login, XML-RPC or REST API.
+addr="$(php "$here/check-site-addresses.php" . 2>&1)" || { bad "the address check could not run: $addr"; addr=""; }
+[ -z "$addr" ] || { printf '%s\n' "$addr"; fail=1; }
+
+# Size: the whole, compressed; how many files; each file. (A name with a line end in it is refused above, and may be
+# counted twice here.) The file to come counts in each, as if it were there.
+if [ "$max_bytes" -gt 0 ]; then
+  if [ -z "$to_come" ]; then
+    size="$(tar -czf - -C . . | wc -c | tr -d ' ')"
+  else
+    # In the archive, a stand-in of its name and size (hex digits, as an id is), from a folder of its own, after the
+    # rest. gzip's size turns on the very bytes and on where they fall, so this is the size of the archive the published
+    # folder makes give or take some tens of bytes (the count of files, and each file's size, are exact).
+    case "${TMPDIR:-}" in /*) tc_dir="$TMPDIR" ;; *) tc_dir=/tmp ;; esac
+    standin="$(mktemp -d "$tc_dir/offprint-check.XXXXXX" 2>/dev/null)" || standin=""
+    if [ -z "$standin" ]; then
+      size=""; bad "the size check could not run: no folder could be made to measure $to_come in"
+    else
+      trap 'rm -rf "$standin"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
+      awk -v n="$to_come_bytes" 'BEGIN { s = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"; while (length(s) < n) s = s s; printf "%s", substr(s, 1, n) }' \
+        > "$standin/$to_come"
+      size="$(tar -czf - -C . . -C "$standin" "./$to_come" | wc -c | tr -d ' ')"
+      rm -rf "$standin"; trap - EXIT INT TERM
+    fi
+  fi
+  if [ -z "$size" ]; then :
+  elif [ "$size" -gt "$max_bytes" ]; then
+    bad "too big: $size bytes compressed, the limit is $max_bytes"
+  elif [ $((size * 100)) -ge $((max_bytes * 80)) ]; then
+    echo "warning: the site is $size bytes compressed, over 80% of the $max_bytes limit" >&2
+  fi
+fi
+if [ "$max_files" -gt 0 ]; then
+  files="$(find . -type f | wc -l | tr -d ' ')"
+  [ -z "$to_come" ] || files=$((files + 1))
+  if [ "$files" -gt "$max_files" ]; then
+    bad "too many files: $files, the limit is $max_files"
+  elif [ $((files * 100)) -ge $((max_files * 80)) ]; then
+    echo "warning: the site has $files files, over 80% of the $max_files limit" >&2
+  fi
+fi
+if [ "$max_file_bytes" -gt 0 ]; then
+  # Every file of 80% of the limit or more (the smallest such size, rounded up), largest or not, in name order: the file
+  # to come too, at its size.
+  near=$(( (max_file_bytes * 80 + 99) / 100 ))
+  big="$( { find . -type f -size +"$((near - 1))"c; [ -z "$to_come" ] || [ "$to_come_bytes" -lt "$near" ] || echo "./$to_come"; } \
+    | LC_ALL=C sort)"
+  while IFS= read -r f; do
+    if [ -n "$to_come" ] && [ "$f" = "./$to_come" ]; then s="$to_come_bytes"
+    else
+      [ -f "$f" ] || continue
+      s="$(wc -c < "$f" | tr -d ' ')"
+    fi
+    shown="$(printf '%s' "${f#./}" | LC_ALL=C tr '\001-\011\013-\037\177' '?')"
+    if [ "$s" -gt "$max_file_bytes" ]; then
+      bad "$shown is $s bytes, the limit for one file is $max_file_bytes"
+    elif [ $((s * 100)) -ge $((max_file_bytes * 80)) ]; then
+      echo "warning: $shown is $s bytes, over 80% of the $max_file_bytes limit for one file" >&2
+    fi
+  done <<EOT
+$big
+EOT
+fi
+
+exit "$fail"

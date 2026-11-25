@@ -109,8 +109,10 @@ flowchart LR
    (once `offprint install-agent` has installed it) moves it out and reads it as data. The agent runs
    `offprint publish`.
 2. WordPress (in Docker, on this Mac) is told to export itself; the exporter runs in the container and writes
-   `var/export`. The export is copied to a private folder, `site.new`: WordPress can still write `var/export`, so only
-   the private copy is checked and published.
+   `var/export`. It starts from the home page, the feed, `robots.txt` and the sitemaps (WordPress's own, or those
+   `robots.txt` names: see [Plugins that replace WordPress's sitemaps](#plugins-that-replace-wordpresss-sitemaps)), and
+   follows every link. The export is copied to a private folder, `site.new`: WordPress can still write `var/export`, so
+   only the private copy is checked and published.
 3. `bin/check-site` checks the copy: no local address, no admin, login, XML-RPC or REST links, no symlinks, no git
    files, none of the files the publish or the host writes at the root (for Cloudflare: `offprint.json`, `_headers`
    and `_redirects`), nor one the host would read as its own (`.assetsignore`, `_worker.js`), and the host's limits.
@@ -435,6 +437,30 @@ re-stamps that site's own set-up and nothing else; running it says that the old 
 site. `offprint host-undo` (also with `--print`) takes this site's set-up away again, and nothing else;
 `/etc/hosts.before-offprint` is never removed.
 
+### Plugins that replace WordPress's sitemaps
+
+The export starts from the home page, the main feed, `robots.txt` and the sitemaps, and follows every link from there:
+a page that nothing links to is exported only because a sitemap lists it. A plugin that serves sitemaps of its own (an
+SEO plugin, say) turns WordPress's off, so the exporter also reads the `Sitemap:` lines of the site's own `robots.txt`
+(its first 512 KB) and exports each sitemap on the site that they name, with the sitemaps and pages it lists. One that
+can't be exported (a line left from an old set-up, a 404) is a warning, "robots.txt names the sitemap ..., which could
+not be exported: ...", not an error, unless a page links to it too; a sitemap or page it lists that fails is an error,
+as for WordPress's own. Only when WordPress's sitemaps are off and no sitemap `robots.txt` names was exported does the
+export warn "Sitemaps are off, so only pages reachable by links from the home page, the feed and the 404 page will be
+exported." That is what "Discourage search engines" gives: it turns WordPress's sitemaps off, and the exported
+`robots.txt` still names `/wp-sitemap.xml`, so that line gets its warning too.
+
+| Plugin | Version | Tested | Result |
+| --- | --- | --- | --- |
+| Yoast SEO (`wordpress-seo`) | 28.9 | 24 November 2026 | 6 ok, 0 FAIL |
+
+`bash tests/compat-seo.sh SLUG` tests another, by its wordpress.org slug. On a throwaway WordPress, as `tests/e2e.sh`
+makes, with a few posts, a category, a tag and a page that nothing links to, it installs and activates the plugin,
+exports, and checks one line each: the export has no errors; it has every sitemap on the site that its `robots.txt`
+names; it has every published post, page, category, tag and author archive WordPress has; the page nothing links to is
+there, and no other page links to it (the control); no file holds the local hostname; and `bin/check-site` passes on
+it. Its last line is the table's row. It needs Docker and the network (the plugin comes from wordpress.org).
+
 ### Tests
 
 | Suite | Command | Needs Docker | In CI |
@@ -452,10 +478,13 @@ site. `offprint host-undo` (also with `--print`) takes this site's set-up away a
 | `site.json` loader | `bash tests/config.test.sh` | no | yes |
 | Names that must not be in the tool | `bash tests/names.test.sh` | no | yes |
 | End to end | `bash tests/e2e.sh` | yes | no |
+| A plugin that replaces WordPress's sitemaps | `bash tests/compat-seo.sh SLUG` | yes, and the network | no |
 | A running site | `bash tests/site.test.sh SITE_DIR` | yes (a set-up site) | no |
 
 The first twelve need only bash, git, PHP, Perl and Node. `tests/e2e.sh` builds a throwaway WordPress in the compose
-project `offprint-e2e` and removes it afterwards; `tests/site.test.sh` reads a real, running site and changes nothing.
+project `offprint-e2e` and removes it afterwards; `tests/compat-seo.sh` builds the same one (`tests/e2e-setup.sh` is
+their shared set-up), so the two never run at the same time: each refuses to start while that project exists.
+`tests/site.test.sh` reads a real, running site and changes nothing.
 
 ## Licence
 

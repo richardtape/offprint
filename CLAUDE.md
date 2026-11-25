@@ -32,8 +32,10 @@ os/darwin/secret              a named secret of a site's in the login Keychain (
 plugin/                       the WordPress plugin: offprint.php, offprint/{admin-bar.css,admin-bar.js,src/*.php}
 templates/                    compose.yaml, Caddyfile, wordpress/Dockerfile, site.gitignore (for a site's repo)
 docs/how-it-fits-together.md  the diagrams of what lives where and of a publish (README.md embeds the first two)
-tests/                        every suite (tests/php, tests/fixtures, *.test.sh, *.test.js, e2e.sh);
-                              tests/fixtures/adapters/workflow is an adapter outside the tool, for tests/publish.test.sh
+tests/                        every suite (tests/php, tests/fixtures, *.test.sh, *.test.js, e2e.sh, compat-seo.sh);
+                              tests/fixtures/adapters/workflow is an adapter outside the tool, for tests/publish.test.sh;
+                              tests/e2e-setup.sh is the throwaway WordPress (compose project offprint-e2e) that e2e.sh and
+                              compat-seo.sh (an SEO plugin's sitemaps, by its wordpress.org slug) both source
 .github/workflows/ci.yml      CI
 ```
 
@@ -77,7 +79,7 @@ tests/                        every suite (tests/php, tests/fixtures, *.test.sh,
 ## Tests
 
 ```sh
-composer install && vendor/bin/phpunit      # 237 tests
+composer install && vendor/bin/phpunit      # 262 tests
 node --test tests/*.test.js                 # 11 tests
 bash tests/check-site.test.sh               # 407
 bash tests/new.test.sh                      # 381
@@ -89,14 +91,15 @@ bash tests/hosts-block.test.sh              # 4
 bash tests/host.test.sh                     # 780
 bash tests/config.test.sh                   # 247
 bash tests/names.test.sh                    # 9
-bash tests/e2e.sh                           # 273; needs Docker; not in CI
+bash tests/e2e.sh                           # 275; needs Docker; not in CI
+bash tests/compat-seo.sh wordpress-seo      # 6; needs Docker and the network; not in CI; never beside e2e.sh
 bash tests/site.test.sh SITE_DIR            # needs a real, running site; not in CI
 ```
 
 The shell suites print one `ok` or `FAIL` line per case; the counts above are the `ok` lines on macOS. On Linux (CI)
 they differ: `check-site`, `publish`, `adapter`, `agent` and `host` print fewer, since the cases that need the Mac
 (`plutil`, or a disk that takes two letter cases for one name) are skipped there, with a `skip` line; `config` prints
-more, since some of its cases run again under a second bash. All but the last two are hermetic and run in CI.
+more, since some of its cases run again under a second bash. All but the last three are hermetic and run in CI.
 `tests/adapter.test.sh` (the adapter contract, both adapters, `offprint adapter setup` and `doctor`) and
 `tests/secret.test.sh` (`os/darwin/secret`) are the adapters' suites; `tests/new.test.sh` is `offprint new`'s (its
 setup-wp half, the Sample Page and the plugin commit, is in `tests/publish.test.sh`, with setup-wp's other cases). CI
@@ -121,8 +124,9 @@ the `plutil` and `install-agent` cases) are never run in CI. So run `check-site`
   on the `PATH`. Never run the real `npm ci`, wrangler or `security` from a test.
 - Never run the real `security` command in any form that can write (add, delete, set, `-i`, a keychain's settings),
   outside a step the owner attends; experiments use a stand-in only (one such experiment once left stray items in a login Keychain).
-- `tests/e2e.sh` uses the compose project `offprint-e2e` and removes it. Never point a test at a real site's compose
-  project, folder, address or port.
+- `tests/e2e.sh` and `tests/compat-seo.sh` use the compose project `offprint-e2e` (`tests/e2e-setup.sh`) and remove
+  it; they share it, so never run both at once (each refuses to start while it exists). Never point a test at a real
+  site's compose project, folder, address or port.
 - `tests/site.test.sh` needs a real site and is not in CI.
 - A push runs CI, on any branch. Wait for it to go green (`gh run watch`).
 - The repo is public. `main` is never rewritten or force-pushed: its commits must stay reachable.

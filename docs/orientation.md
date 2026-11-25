@@ -146,12 +146,12 @@ Also deferred until something needs it: a WordPress filter that lets a site add 
 
 Check each is still true before relying on it or fixing it.
 
-- On Linux, a publish that inherits `allexport` through `SHELLOPTS` can fail part-way with every command refused
-  ("Argument list too long"): `bin/publish` then exports its own variables, and Linux refuses to start a program
-  when one environment string is over 128 KiB. The status is left at "checking" and the lock and temporary folders
-  stay behind. It is what made one case in `tests/adapter.test.sh` fail on some CI runners. The fix is known
-  (`set +a` at the top of `bin/publish`, with a test that no variable of the publish's own reaches a command) and
-  was not yet made when this was written.
+- With shell tracing inherited through `SHELLOPTS`, `bin/check-site`'s trace ends up among a publish's warnings in
+  `var/status.json`. Cosmetic. (An inherited `allexport` used to make this fatal on Linux, where no program can be
+  started while one environment string is over 128 KiB; `lib/site.sh` now turns `allexport` off first thing.)
+- `tests/adapter.test.sh`'s `no_leak` reports any leftover private folder as a token leak, because it searches for
+  every eight-character piece of the test token, runs of digits included, and the adapter's own code holds such
+  runs. A leftover folder is a real failure; the message is misleading.
 - One timing case in `tests/secret.test.sh` fails when the suite runs beside the two slow suites. Run it alone.
 - With "discourage search engines" on, the exported `robots.txt` still names `wp-sitemap.xml`, which gives an
   extra warning.

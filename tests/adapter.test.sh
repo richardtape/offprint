@@ -2617,6 +2617,9 @@ use warnings;
 my $s = '@STUBS@';
 @ENVCHECK@
 envcheck('@NAME@');
+# (a variable the tool sets for itself, never one it exports: seen here, an inherited allexport is still on)
+{ my @own = grep { exists $ENV{$_} } qw(TOOL OFFPRINT_SYSTEM_PATH WARNINGS);
+  if (@own and open(my $o, '>>', "$s/env.own")) { print $o "@NAME@: @own\n"; close $o; } }
 if (open(my $r, '>>', "$s/env.ran")) { print $r "@NAME@\n"; close $r; }
 exec { '@REAL@' } '@REAL@', @ARGV or die "@REAL@: $!";
 WRAP
@@ -3307,11 +3310,13 @@ check "$t: done, the token stored" "0|the token" "$code|$(cat "$S/security.store
 check "control: $t: the wrapped commands and the stand-ins ran (php, mktemp, rm; security, curl, npm)" "yes|yes|yes|yes|yes|yes" \
   "$(grep -qx php "$S/env.ran" && echo yes)|$(grep -qx mktemp "$S/env.ran" && echo yes)|$(grep -qx rm "$S/env.ran" && echo yes)|$(grep -q '^-i$' "$S/security.argv" && echo yes)|$(exists "$S/curl.argv")|$(calls npm.runs | grep -qx 1 && echo yes)"
 check "$t: no process it started had the token in its environment" "" "$(cat "$S/env.hits" 2>/dev/null)"
+check "$t: no command was handed a variable of the tool's own (the inherited allexport is turned off)" "" "$(sort -u "$S/env.own" 2>/dev/null | head -n 3)"
 no_leak "$t"
 out="$(cd "$tmp/case$n" && env SHELLOPTS=allexport:xtrace PATH="$CS_PATH" STUB_DIR="$S" OFFPRINT_SITE="$c" OFFPRINT_HOME="$OH" OFFPRINT_SECURITY="$S/security" \
   TMPDIR="$tmp/case$n/tmpdir" /bin/bash "$SRC/bin/offprint" adapter doctor 2>&1 < /dev/null)"; t="offprint adapter doctor, SHELLOPTS=allexport:xtrace inherited"
 check "$t: the token checked (accepted)" "yes" "$(printf '%s\n' "$out" | grep -q '^ok       Cloudflare knows the token' && echo yes || echo no)"
 check "$t: no process it started had the token in its environment" "" "$(cat "$S/env.hits" 2>/dev/null)"
+check "$t: no command was handed a variable of the tool's own (the inherited allexport is turned off)" "" "$(sort -u "$S/env.own" 2>/dev/null | head -n 3)"
 no_leak "$t"
 # os/darwin/secret itself, run with allexport inherited: the line it hands security holds the value in hex, and is in
 # no process's environment.
@@ -3327,6 +3332,7 @@ out="$(cd "$tmp/case$n" && env SHELLOPTS=allexport:xtrace PATH="$S/bin:$tmp/bin:
 check "$t: live, node given the token" "0|live|CLOUDFLARE_API_TOKEN=the stored token" "$code|$(js state)|$(grep '^CLOUDFLARE_API_TOKEN=' "$S/node.values")"
 check "control: $t: the wrapped commands ran during the deploy (git, php, mkfifo)" "yes|yes|yes" "$(grep -qx git "$S/env.ran" && echo yes)|$(grep -qx php "$S/env.ran" && echo yes)|$(grep -qx mkfifo "$S/env.ran" && echo yes)"
 check "$t: no process but node had the token in its environment" "" "$(cat "$S/env.hits" 2>/dev/null)"
+check "$t: no command was handed a variable of the tool's own (the inherited allexport is turned off)" "" "$(sort -u "$S/env.own" 2>/dev/null | head -n 3)"
 no_leak "$t"
 
 # Cloudflare's 200 counts only when the top level of its JSON says "success": true; anything else is not understood, and

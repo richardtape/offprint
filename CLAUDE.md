@@ -89,7 +89,7 @@ node --test tests/*.test.js                 # 11 tests
 bash tests/check-site.test.sh               # 407
 bash tests/new.test.sh                      # 381
 bash tests/publish.test.sh                  # 1289 (slow: several minutes)
-bash tests/adapter.test.sh                  # 2180 (slow: several minutes)
+bash tests/adapter.test.sh                  # 2183 (slow: several minutes)
 bash tests/secret.test.sh                   # 335
 bash tests/agent.test.sh                    # 305
 bash tests/hosts-block.test.sh              # 4

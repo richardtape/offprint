@@ -38,6 +38,12 @@
 # absolute entry outside every site folder that can be entered is the owner's own to keep clean (README.md, the security
 # table): whatever is there runs, as it would for any command. TMPDIR is held the same way (offprint_check_tmpdir).
 
+# An inherited allexport (SHELLOPTS=allexport in the environment turns it on in every bash) is turned off here, for the
+# whole command: with it, every variable and function a script sets would go into the environment of each program it
+# starts, and on Linux no program can be started while one such string is over 128 KiB (a publish's warnings can be), so
+# a publish could neither write its status nor remove what it made. What the caller itself exported stays exported.
+set +a
+
 case "${BASH_SOURCE[0]}" in */*) _offprint_lib="${BASH_SOURCE[0]%/*}" ;; *) _offprint_lib=. ;; esac
 TOOL="$(CDPATH= cd -P -- "${_offprint_lib:-/}" && CDPATH= cd -P -- .. && pwd -P)" && [ -n "$TOOL" ] \
   || { printf '%s\n' "Offprint can't find its own folder (from ${BASH_SOURCE[0]}), so nothing was done." >&2; return 2; }

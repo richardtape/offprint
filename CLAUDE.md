@@ -2,6 +2,10 @@
 
 For coding agents working in this repo. `README.md` says what Offprint is and what is built; this says how to work on it.
 
+New to the project? Read `docs/orientation.md` before your first change: what the tool is for, how a publish and the
+export work, where a new feature goes, what is decided but not built, and what has gone wrong before. This file is
+the rules; that one is why they are the rules.
+
 ## Layout
 
 ```
@@ -32,6 +36,7 @@ os/darwin/secret              a named secret of a site's in the login Keychain (
 plugin/                       the WordPress plugin: offprint.php, offprint/{admin-bar.css,admin-bar.js,src/*.php}
 templates/                    compose.yaml, Caddyfile, wordpress/Dockerfile, site.gitignore (for a site's repo)
 docs/how-it-fits-together.md  the diagrams of what lives where and of a publish (README.md embeds the first two)
+docs/orientation.md           the picture for an agent new to the project: read it before a first change
 tests/                        every suite (tests/php, tests/fixtures, *.test.sh, *.test.js, e2e.sh, compat-seo.sh);
                               tests/fixtures/adapters/workflow is an adapter outside the tool, for tests/publish.test.sh;
                               tests/e2e-setup.sh is the throwaway WordPress (compose project offprint-e2e) that e2e.sh and

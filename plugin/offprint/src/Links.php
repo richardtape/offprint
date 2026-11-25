@@ -13,7 +13,7 @@ use DOMElement;
 use DOMProcessingInstruction;
 use DOMXPath;
 
-/** Finds the URLs a page, stylesheet, script or sitemap refers to. Returns absolute, de-duplicated URLs. */
+/** Finds the URLs a page, stylesheet, script, sitemap or robots.txt refers to. Returns absolute, de-duplicated URLs. */
 final class Links
 {
     private const SRC_TAGS = ['script', 'img', 'video', 'audio', 'source', 'track', 'embed', 'iframe'];
@@ -126,6 +126,25 @@ final class Links
         }
         foreach ($doc->getElementsByTagNameNS(self::SITEMAP_NS, 'loc') as $loc) {
             $refs[] = $loc->textContent;
+        }
+        return self::absolute($refs, $base_url);
+    }
+
+    /**
+     * The address of each Sitemap: line of a robots.txt, as robots.txt has it: the field name in any letter case at the
+     * start of the line (spaces before it, and round the colon, allowed), its value up to a # comment or the line's end.
+     * Any line end; a byte-order mark at the start is ignored. A line that only contains the word gives nothing.
+     */
+    public static function from_robots(string $text, string $base_url): array
+    {
+        if (str_starts_with($text, "\xEF\xBB\xBF")) {
+            $text = substr($text, 3);
+        }
+        $refs = [];
+        foreach (preg_split('~\r\n|\r|\n~', $text) ?: [] as $line) {
+            if (preg_match('~^[ \t]*sitemap[ \t]*:([^#]*)~i', $line, $m)) {
+                $refs[] = $m[1];
+            }
         }
         return self::absolute($refs, $base_url);
     }

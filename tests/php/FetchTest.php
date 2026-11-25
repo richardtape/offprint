@@ -42,6 +42,25 @@ final class FetchTest extends TestCase
         $this->assertNull(Fetch::target(self::BASE, $url));
     }
 
+    public static function media_types(): array
+    {
+        return [
+            ['text/xml; charset=UTF-8', 'text/xml'],
+            ['application/xml;charset=utf-8', 'application/xml'],
+            ['Application/XML', 'application/xml'],
+            [' text/xml ', 'text/xml'],
+            ['text/plain ; charset=utf-8', 'text/plain'],
+            ['', ''],
+        ];
+    }
+
+    /** A sitemap comes as application/xml or text/xml, with a charset or not: the Exporter sees the media type alone. */
+    #[DataProvider('media_types')]
+    public function test_the_content_type_is_its_media_type_alone_in_lower_case(string $header, string $type): void
+    {
+        $this->assertSame($type, Fetch::media_type($header));
+    }
+
     public function test_get_says_why_it_refused(): void
     {
         $fetch = new Fetch(self::BASE, 'wp.local', str_repeat('a', 40));

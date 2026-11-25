@@ -198,6 +198,43 @@ line url(x.png) */';
         ], Links::from_sitemap($xml, 'https://blog.example.com/wp-sitemap-posts-post-1.xml'));
     }
 
+    public function test_robots_sitemap_lines_as_a_plugin_wrote_them_for_real(): void
+    {
+        // A real robots.txt from a WordPress whose SEO plugin serves sitemaps of its own, with no line end at the end.
+        $text = "User-agent: *\nAllow: /\n\nSitemap: https://www.example.com/wp-sitemap.xml\n\n"
+            . "# START YOAST BLOCK\n# ---------------------------\nUser-agent: *\nDisallow:\n\n"
+            . "Sitemap: https://www.example.com/sitemap_index.xml\n# ---------------------------\n# END YOAST BLOCK";
+        $this->assertSame([
+            'https://www.example.com/wp-sitemap.xml',
+            'https://www.example.com/sitemap_index.xml',
+        ], Links::from_robots($text, 'https://www.example.com/robots.txt'));
+    }
+
+    public function test_robots_sitemap_lines_in_every_shape_robots_txt_allows(): void
+    {
+        $base = 'https://blog.example.com/robots.txt';
+        $text = "\xEF\xBB\xBFSitemap: https://blog.example.com/bom.xml\r\n"   // a byte-order mark, then CRLF
+            . "SITEMAP:https://blog.example.com/upper.xml\r"                     // any letter case, no space; CR
+            . "sitemap \t:  https://blog.example.com/spaces.xml  \n"             // spaces round the colon, trailing
+            . "Sitemap: https://blog.example.com/commented.xml # the old one\n"  // a comment after it
+            . "  \tSitemap: /relative.xml\n"                                     // indented; relative, made absolute
+            . "Sitemap: https://example.com/other-host.xml\n"                    // another host is the Exporter's to judge
+            . "Sitemap: https://blog.example.com/upper.xml\n"                    // again: once
+            . "Sitemap:\nSitemap: # nothing\n"                                   // no address
+            . "Nositemap: /no-1.xml\n# Sitemap: /no-2.xml\nSitemaps: /no-3.xml\nUser-agent: * # Sitemap: /no-4.xml\n"
+            . "Disallow: /sitemap: /no-5.xml\nSite-map: /no-6.xml";
+        $this->assertSame([
+            'https://blog.example.com/bom.xml',
+            'https://blog.example.com/upper.xml',
+            'https://blog.example.com/spaces.xml',
+            'https://blog.example.com/commented.xml',
+            'https://blog.example.com/relative.xml',
+            'https://example.com/other-host.xml',
+        ], Links::from_robots($text, $base));
+        $this->assertSame([], Links::from_robots('', $base));
+        $this->assertSame([], Links::from_robots("User-agent: *\nDisallow: /\n", $base));
+    }
+
     public function test_sitemap_reads_nothing_from_what_is_not_a_sitemap(): void
     {
         $base = 'https://blog.example.com/wp-sitemap.xsl';

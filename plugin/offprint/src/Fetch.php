@@ -58,6 +58,12 @@ final class Fetch implements Fetcher
         return str_starts_with($target, $base . '/') ? $target : null;
     }
 
+    /** A Content-Type header's media type alone, in lower case: "text/xml; charset=UTF-8" is text/xml. */
+    public static function media_type(string $content_type): string
+    {
+        return strtolower(trim(explode(';', $content_type)[0]));
+    }
+
     public function get(string $url): array|string
     {
         $target = self::target($this->fetch_base, $url);
@@ -98,7 +104,7 @@ final class Fetch implements Fetcher
         rewind($body);
         return [
             'status' => (int) curl_getinfo($curl, CURLINFO_RESPONSE_CODE),
-            'type' => strtolower(trim(explode(';', $type)[0])),
+            'type' => self::media_type($type),
             'location' => $found['location'],
             'encoding' => $found['content-encoding'],
             'body' => $body,

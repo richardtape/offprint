@@ -81,13 +81,309 @@ final class ExporterTest extends TestCase
     }
 
     /** @param array<string, array|Throwable> $routes Paths (with any query) => response. */
-    private function export(array $routes, array $seeds = ['/'], int $max_requests = 20000): Report
+    private function export(array $routes, array $seeds = ['/'], int $max_requests = 20000, bool $sitemaps_off = false): Report
     {
         foreach ($routes as $path => $route) {
             $this->fetcher->routes[self::O . $path] = $route;
         }
         $exporter = new Exporter(self::O, $this->fetcher, 'wp.local', self::SECRET, $max_requests);
-        return $exporter->run($this->out, new Seeds(array_map(fn ($p) => self::O . $p, $seeds)));
+        return $exporter->run($this->out, new Seeds(array_map(fn ($p) => self::O . $p, $seeds), [], [], $sitemaps_off));
+    }
+
+    private const SITEMAPS_OFF = 'Sitemaps are off, so only pages reachable by links from the home page, the feed and the 404 page will be exported.';
+
+    private static function robots(string $text, string $type = 'text/plain'): array
+    {
+        return ['body' => $text, 'type' => $type];
+    }
+
+    /** A sitemap index of these paths, as a plugin writes one: an xml-stylesheet first, written protocol-relative. */
+    private static function sitemap_index(string ...$paths): string
+    {
+        return '<?xml version="1.0" encoding="UTF-8"?><?xml-stylesheet type="text/xsl" href="//blog.example.com/main-sitemap.xsl"?>'
+            . '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            . implode('', array_map(fn ($p) => '<sitemap><loc>' . self::O . "$p</loc></sitemap>", $paths)) . '</sitemapindex>';
+    }
+
+    private static function urlset(string ...$paths): string
+    {
+        return '<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            . implode('', array_map(fn ($p) => '<url><loc>' . self::O . "$p</loc></url>", $paths)) . '</urlset>';
+    }
+
+    private function asked_for(string $path): bool
+    {
+        return in_array(self::O . $path, $this->fetcher->asked, true);
+    }
+
+    public function test_a_sitemap_index_robots_txt_names_is_read_and_so_are_the_sitemaps_and_pages_it_lists(): void
+    {
+        $report = $this->export([
+            '/' => self::page('Home, linking to nothing'),
+            '/robots.txt' => self::robots("User-agent: *\nDisallow:\n\nSitemap: " . self::O . "/sitemap_index.xml\n"),
+            '/sitemap_index.xml' => self::page(self::sitemap_index('/post-sitemap.xml', '/page-sitemap.xml'), 'text/xml'),
+            '/main-sitemap.xsl' => self::page('<xsl:stylesheet version="1.0"/>', 'text/xsl'),
+            '/post-sitemap.xml' => self::page(self::urlset('/a-post/', '/another-post/'), 'application/xml'),
+            '/page-sitemap.xml' => self::page(self::urlset('/a-page/'), 'text/xml'),
+            '/a-post/' => self::page('A post'),
+            '/another-post/' => self::page('Another post'),
+            '/a-page/' => self::page('A page'),
+        ], ['/', '/robots.txt'], sitemaps_off: true);
+        $this->assertSame([], $report->errors);
+        $this->assertSame([], $report->warnings); // A sitemap robots.txt names was saved: no "Sitemaps are off".
+        foreach (['robots.txt', 'sitemap_index.xml', 'main-sitemap.xsl', 'post-sitemap.xml', 'page-sitemap.xml',
+            'a-post/index.html', 'another-post/index.html', 'a-page/index.html'] as $file) {
+            $this->assertFileExists("$this->out/$file");
+        }
+        $this->assertSame(10, $report->files); // Those, the home page and 404.html: each once.
+    }
+
+    public function test_the_real_robots_txt_whose_wordpress_sitemap_redirects_to_the_plugins_ends_with_a_file_at_both(): void
+    {
+        $robots = "User-agent: *\nAllow: /\n\nSitemap: " . self::O . "/wp-sitemap.xml\n\n# START YOAST BLOCK\n"
+            . "# ---------------------------\nUser-agent: *\nDisallow:\n\nSitemap: " . self::O . "/sitemap_index.xml\n"
+            . "# ---------------------------\n# END YOAST BLOCK";
+        $index = self::sitemap_index('/post-sitemap.xml');
+        $report = $this->export([
+            '/' => self::page('Home'),
+            '/robots.txt' => self::robots($robots),
+            '/wp-sitemap.xml' => self::redirect(self::O . '/sitemap_index.xml'),
+            '/sitemap_index.xml' => self::page($index, 'text/xml'),
+            '/main-sitemap.xsl' => self::page('<xsl:stylesheet version="1.0"/>', 'text/xml'),
+            '/post-sitemap.xml' => self::page(self::urlset('/hello/'), 'text/xml'),
+            '/hello/' => self::page('Hello'),
+        ], ['/', '/robots.txt'], sitemaps_off: true);
+        $this->assertSame([], $report->errors);
+        $this->assertSame([], $report->warnings);
+        $this->assertSame($index, file_get_contents("$this->out/wp-sitemap.xml"));
+        $this->assertSame($index, file_get_contents("$this->out/sitemap_index.xml"));
+        $this->assertSame('Hello', file_get_contents("$this->out/hello/index.html"));
+        $this->assertSame(1, count(array_keys($this->fetcher->asked, self::O . '/post-sitemap.xml', true)));
+    }
+
+    public function test_a_sitemap_address_robots_txt_names_that_redirects_to_one_it_does_not_name_is_followed(): void
+    {
+        $index = self::sitemap_index('/post-sitemap.xml');
+        $report = $this->export([
+            '/' => self::page('Home'),
+            '/robots.txt' => self::robots('Sitemap: ' . self::O . '/wp-sitemap.xml'),
+            '/wp-sitemap.xml' => self::redirect(self::O . '/sitemap_index.xml'),
+            '/sitemap_index.xml' => self::page($index, 'text/xml'),
+            '/main-sitemap.xsl' => self::page('<xsl:stylesheet version="1.0"/>', 'text/xsl'),
+            '/post-sitemap.xml' => self::page(self::urlset('/hello/'), 'text/xml'),
+            '/hello/' => self::page('Hello'),
+        ], ['/', '/robots.txt'], sitemaps_off: true);
+        $this->assertSame([], $report->errors);
+        $this->assertSame([], $report->warnings);
+        $this->assertSame($index, file_get_contents("$this->out/wp-sitemap.xml"));
+        $this->assertSame($index, file_get_contents("$this->out/sitemap_index.xml"));
+        $this->assertSame('Hello', file_get_contents("$this->out/hello/index.html"));
+    }
+
+    public function test_a_stale_sitemap_line_in_robots_txt_is_a_warning_and_the_export_goes_on(): void
+    {
+        $robots = "Sitemap: /gone.xml\nSitemap: /away.xml\nSitemap: /loop.xml\nSitemap: /zipped.xml\nSitemap: /moved\n"
+            . "Sitemap: /sitemap.xml\n";
+        $report = $this->export([
+            '/' => self::page('<a href="/a/">a</a>'),
+            '/a/' => self::page('A'),
+            '/robots.txt' => self::robots($robots),
+            '/away.xml' => self::redirect('https://example.com/sitemap.xml'),
+            '/loop.xml' => self::redirect(self::O . '/loop-2.xml'),
+            '/loop-2.xml' => self::redirect(self::O . '/loop.xml'),
+            '/zipped.xml' => ['body' => "\x1f\x8b", 'type' => 'application/xml', 'encoding' => 'gzip'],
+            '/moved' => self::redirect(self::O . '/moved/'),
+            '/sitemap.xml' => self::page(self::urlset('/b/'), 'text/xml'),
+            '/b/' => self::page('B'),
+        ], ['/', '/robots.txt']);
+        $this->assertSame([], $report->errors);
+        $named = 'robots.txt names the sitemap ' . self::O;
+        $this->assertSame([
+            "$named/away.xml, which could not be exported: it redirects to https://example.com/sitemap.xml, which is not exported",
+            "$named/gone.xml, which could not be exported: it answered 404",
+            "$named/loop.xml, which could not be exported: it redirects more than 5 times",
+            "$named/moved, which could not be exported: " . self::O . '/moved/ answered 404',
+            "$named/zipped.xml, which could not be exported: it could not be fetched: it came back compressed (Content-Encoding: gzip), which the export cannot read",
+        ], self::sorted($report->warnings));
+        foreach (['index.html', 'a/index.html', 'robots.txt', 'sitemap.xml', 'b/index.html', '404.html'] as $file) {
+            $this->assertFileExists("$this->out/$file");
+        }
+        $this->assertNotContains('https://example.com/sitemap.xml', $this->fetcher->asked);
+    }
+
+    public function test_what_a_sitemap_robots_txt_names_lists_is_an_error_when_it_fails_as_for_wordpress_own(): void
+    {
+        $report = $this->export([
+            '/' => self::page('Home'),
+            '/robots.txt' => self::robots('Sitemap: /sitemap_index.xml'),
+            '/sitemap_index.xml' => self::page(self::sitemap_index('/post-sitemap.xml', '/page-sitemap.xml'), 'text/xml'),
+            '/main-sitemap.xsl' => self::page('<xsl:stylesheet version="1.0"/>', 'text/xsl'),
+            '/page-sitemap.xml' => self::page(self::urlset('/gone/'), 'text/xml'),
+        ], ['/', '/robots.txt']);
+        $this->assertSame([
+            self::O . '/gone/ answered 404 (linked from ' . self::O . '/page-sitemap.xml).',
+            self::O . '/post-sitemap.xml answered 404 (linked from ' . self::O . '/sitemap_index.xml).',
+        ], self::sorted($report->errors));
+        $this->assertSame([], $report->warnings);
+    }
+
+    public function test_sitemaps_off_and_no_sitemap_named_by_robots_txt_saved_is_the_warning_as_before_once(): void
+    {
+        $report = $this->export([
+            '/' => self::page('Home'),
+            '/robots.txt' => self::robots("User-agent: *\nDisallow: /\n"),
+        ], ['/', '/robots.txt'], sitemaps_off: true);
+        $this->assertSame([], $report->errors);
+        $this->assertSame([self::SITEMAPS_OFF], $report->warnings);
+    }
+
+    public function test_sitemaps_off_and_a_stale_sitemap_line_is_both_warnings_the_sitemaps_one_first(): void
+    {
+        // As with "Discourage search engines": WordPress's own sitemap is off, and robots.txt still names it.
+        $forms = implode('', array_map(fn ($i) => "<form action=\"/f$i/\"></form>", range(1, 3)));
+        $report = $this->export([
+            '/' => self::page($forms),
+            '/robots.txt' => self::robots("User-agent: *\nAllow: /\n\nSitemap: " . self::O . "/wp-sitemap.xml\n"),
+        ], ['/', '/robots.txt'], sitemaps_off: true);
+        $this->assertSame([], $report->errors);
+        $this->assertSame(self::SITEMAPS_OFF, $report->warnings[0]);
+        $this->assertSame(1, count(array_keys($report->warnings, self::SITEMAPS_OFF, true)));
+        $this->assertContains(
+            'robots.txt names the sitemap ' . self::O . '/wp-sitemap.xml, which could not be exported: it answered 404',
+            $report->warnings
+        );
+        $this->assertCount(5, $report->warnings); // And the three forms.
+    }
+
+    public function test_sitemaps_on_is_never_the_sitemaps_off_warning(): void
+    {
+        $report = $this->export(['/' => self::page('Home'), '/robots.txt' => self::robots('')], ['/', '/robots.txt']);
+        $this->assertSame([], $report->warnings);
+    }
+
+    public function test_a_sitemap_on_another_host_is_left_alone(): void
+    {
+        $report = $this->export([
+            '/' => self::page('Home'),
+            '/robots.txt' => self::robots("Sitemap: https://example.com/sitemap.xml\nSitemap: https://cdn.blog.example.com/s.xml\n"),
+        ], ['/', '/robots.txt']);
+        $this->assertSame([], $report->errors);
+        $this->assertSame([], $report->warnings);
+        foreach ($this->fetcher->asked as $url) {
+            $this->assertStringStartsWith(self::O . '/', $url);
+        }
+        $this->assertCount(3, $this->fetcher->asked); // The 404 probe, the home page and robots.txt.
+    }
+
+    public function test_a_same_site_sitemap_the_rules_refuse_is_the_not_exported_warning_naming_robots_txt(): void
+    {
+        $report = $this->export([
+            '/' => self::page('<a href="/?sitemap=1">a page links to it too</a>'),
+            '/robots.txt' => self::robots("Sitemap: /?sitemap=1\nSitemap: /wp-json/sitemap.xml\nSitemap: http://blog.example.com/s.xml\n"),
+        ], ['/', '/robots.txt']);
+        $this->assertSame([], $report->errors);
+        $this->assertSame([
+            self::O . '/ links to ' . self::O . '/?sitemap=1, which is not exported (2 pages in all).',
+            'robots.txt links to http://blog.example.com/s.xml, which is not exported.',
+            'robots.txt links to ' . self::O . '/wp-json/sitemap.xml, which is not exported.',
+        ], self::sorted($report->warnings));
+        $this->assertFalse($this->asked_for('/?sitemap=1'));
+        $this->assertFalse($this->asked_for('/wp-json/sitemap.xml'));
+        $this->assertNotContains('http://blog.example.com/s.xml', $this->fetcher->asked);
+    }
+
+    public function test_a_feed_robots_txt_names_as_a_sitemap_is_the_not_exported_warning_if_it_is_not_the_main_one(): void
+    {
+        $rss = '<?xml version="1.0"?><rss><channel><link>' . self::O . '/</link></channel></rss>';
+        $report = $this->export([
+            '/' => self::page('Home'),
+            '/robots.txt' => self::robots("Sitemap: /feed/\nSitemap: /tag/x/feed/\n"),
+            '/feed/' => self::page($rss, 'application/rss+xml'),
+            '/tag/x/feed/' => self::page($rss, 'application/rss+xml'),
+        ], ['/', '/robots.txt'], sitemaps_off: true);
+        $this->assertSame([], $report->errors);
+        // The main feed was saved, so a sitemap robots.txt names was: no "Sitemaps are off".
+        $this->assertSame(['robots.txt links to ' . self::O . '/tag/x/feed/, which is not exported.'], $report->warnings);
+        $this->assertFileExists("$this->out/feed/index.xml");
+        $this->assertDirectoryDoesNotExist("$this->out/tag");
+    }
+
+    public function test_a_failing_sitemap_a_page_also_links_to_is_an_error_naming_that_page(): void
+    {
+        // robots.txt queues it before /deep/ is read; the page's broken link still fails the export, as it did.
+        $report = $this->export([
+            '/' => self::page('<a href="/deep/">deep</a>'),
+            '/deep/' => self::page('<a href="/gone.xml">the sitemap</a>'),
+            '/robots.txt' => self::robots('Sitemap: /gone.xml'),
+        ], ['/', '/robots.txt']);
+        $this->assertSame([self::O . '/gone.xml answered 404 (linked from ' . self::O . '/deep/).'], $report->errors);
+        $this->assertSame([], $report->warnings);
+    }
+
+    public function test_a_sitemap_wordpress_lists_is_still_an_error_when_robots_txt_names_it_too(): void
+    {
+        $report = $this->export([
+            '/' => self::page('Home'),
+            '/robots.txt' => self::robots('Sitemap: ' . self::O . '/wp-sitemap.xml'),
+        ], ['/', '/robots.txt', '/wp-sitemap.xml']);
+        $this->assertSame([self::O . '/wp-sitemap.xml answered 404 (linked from WordPress).'], $report->errors);
+        $this->assertSame([], $report->warnings);
+    }
+
+    public function test_a_sitemap_robots_txt_names_that_holds_the_local_host_is_still_an_error(): void
+    {
+        $report = $this->export([
+            '/' => self::page('Home'),
+            '/robots.txt' => self::robots('Sitemap: /s.xml'),
+            '/s.xml' => self::page('<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://wp.local/x/</loc></url></urlset>', 'text/xml'),
+        ], ['/', '/robots.txt']);
+        $this->assertSame([self::O . '/s.xml contains wp.local, which must never be published.'], $report->errors);
+    }
+
+    public function test_robots_txt_is_read_whatever_its_content_type(): void
+    {
+        $report = $this->export([
+            '/' => self::page('Home'),
+            '/robots.txt' => self::robots('Sitemap: /s.xml', 'application/octet-stream'),
+            '/s.xml' => self::page(self::urlset('/p/'), 'text/xml'),
+            '/p/' => self::page('P'),
+        ], ['/', '/robots.txt']);
+        $this->assertSame([], $report->errors);
+        $this->assertFileExists("$this->out/p/index.html");
+    }
+
+    public function test_a_robots_txt_anywhere_but_the_root_is_not_read(): void
+    {
+        $report = $this->export([
+            '/' => self::page('<a href="/sub/robots.txt">r</a><a href="/robots.txt/">r</a>'),
+            '/sub/robots.txt' => self::robots('Sitemap: /from-sub.xml'),
+            '/robots.txt/' => self::page('Sitemap: /from-folder.xml'),
+        ]);
+        $this->assertSame([], $report->errors);
+        $this->assertFileExists("$this->out/sub/robots.txt");
+        $this->assertFalse($this->asked_for('/from-sub.xml'));
+        $this->assertFalse($this->asked_for('/from-folder.xml'));
+    }
+
+    public function test_a_600_kb_robots_txt_is_saved_whole_and_read_for_its_first_512_kb(): void
+    {
+        $limit = 512 * 1024;
+        $head = "Sitemap: /early.xml\n";
+        // One long comment, so the next line starts 13 bytes before the limit ("Sitemap: /str" is before it).
+        $text = $head . '#' . str_repeat('x', $limit - 13 - strlen($head) - 2) . "\n"
+            . "Sitemap: /straddle.xml\n" . str_repeat("#\n", 50000) . "Sitemap: /late.xml\n";
+        $this->assertGreaterThan(600 * 1024, strlen($text));
+        $report = $this->export([
+            '/' => self::page('Home'),
+            '/robots.txt' => self::robots($text),
+            '/early.xml' => self::page(self::urlset('/p/'), 'text/xml'),
+            '/p/' => self::page('P'),
+        ], ['/', '/robots.txt']);
+        $this->assertSame([], $report->errors);
+        $this->assertSame(strlen($text), filesize("$this->out/robots.txt"));
+        $this->assertTrue($this->asked_for('/early.xml'));
+        $this->assertFileExists("$this->out/p/index.html");
+        $this->assertSame([], array_values(array_filter($this->fetcher->asked, fn ($u) => str_contains($u, '/str') || str_contains($u, '/late'))));
     }
 
     private function assertErrorContains(Report $report, string $needle): void

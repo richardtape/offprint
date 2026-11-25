@@ -14,21 +14,25 @@ use Throwable;
 final class Seeds
 {
     /**
-     * @param string[] $addresses Public addresses.
+     * @param string[] $addresses    Public addresses.
      * @param string[] $warnings
      * @param string[] $errors
+     * @param bool     $sitemaps_off WordPress's own sitemaps are off, so it listed only the home page, the feed and
+     *                               robots.txt. The Exporter says what that costs, unless robots.txt names a sitemap
+     *                               it could save (a plugin that serves sitemaps of its own turns WordPress's off).
      */
     public function __construct(
         public array $addresses = [],
         public array $warnings = [],
-        public array $errors = []
+        public array $errors = [],
+        public bool $sitemaps_off = false
     ) {
     }
 
     /**
      * Asks WordPress: the home page, the main feed, robots.txt, and every address the sitemap
      * providers list along with the sitemaps themselves. Needs WordPress, so it is covered by
-     * tests/e2e.sh, not PHPUnit.
+     * tests/e2e.sh and tests/compat-seo.sh, not PHPUnit.
      */
     public static function from_wordpress(string $public_origin): self
     {
@@ -46,9 +50,8 @@ final class Seeds
             $add(home_url('/robots.txt'));
             $server = wp_sitemaps_get_server();
             if (!$server->sitemaps_enabled()) {
-                // As "Discourage search engines" does.
-                $seeds->warnings[] = 'Sitemaps are off, so only pages reachable by links from the home page, '
-                    . 'the feed and the 404 page will be exported.';
+                // As "Discourage search engines" does, and a plugin with sitemaps of its own.
+                $seeds->sitemaps_off = true;
                 return $seeds;
             }
             $add((string) get_sitemap_url('index'));

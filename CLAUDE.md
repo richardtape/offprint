@@ -101,7 +101,7 @@ composer install && vendor/bin/phpunit      # 262 tests
 node --test tests/*.test.js                 # 11 tests
 bash tests/check-site.test.sh               # 407
 bash tests/new.test.sh                      # 381
-bash tests/publish.test.sh                  # 1411 (slow: several minutes)
+bash tests/publish.test.sh                  # 1439 (slow: several minutes)
 bash tests/adapter.test.sh                  # 2183 (slow: several minutes)
 bash tests/secret.test.sh                   # 335
 bash tests/agent.test.sh                    # 305
@@ -113,7 +113,7 @@ bash tests/backup.test.sh                   # 273
 bash tests/e2e.sh                           # 275; needs Docker; not in CI
 bash tests/compat-seo.sh wordpress-seo      # 6; needs Docker and the network; not in CI; never beside e2e.sh
 bash tests/backup-real.sh                   # 15; needs the real age (brew install age); not in CI
-bash tests/restore-real.sh                  # 27; needs Docker, mkcert and the real age; not in CI
+bash tests/restore-real.sh                  # 31; needs Docker, mkcert and the real age; not in CI
 bash tests/site.test.sh SITE_DIR            # needs a real, running site; not in CI
 ```
 

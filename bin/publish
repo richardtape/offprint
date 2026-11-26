@@ -234,6 +234,12 @@ status() {
   rm -f "$tmp.w"
   log "[$1] $2"
   echo "[$1] $2"
+  # The last status of a run: its warnings are for whoever is at the terminal too, not only for the admin bar (a
+  # warning said once, such as that earlier commits hold a readable dump, would otherwise go unseen). Each on a line of
+  # its own, indented; no control character of WordPress's reaches the terminal; at most 50, as in var/status.json.
+  if [ "$running" = false ] && [ -n "$WARNINGS" ]; then
+    printf '%s\n' "$WARNINGS" | printable | awk 'NF { if (n < 50) print "  " $0; else more++; n++ } END { if (more) print "  and " more " more" }'
+  fi
 }
 fail() { FINAL=1; status failed "$1" final; exit 1; }
 finish() { FINAL=1; status "$1" "$2" final; exit 0; }

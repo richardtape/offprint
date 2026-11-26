@@ -89,8 +89,16 @@ case "$*" in
   # installs, whose post 2 is what post2.json says (none without it), and whose deletion fails with post_delete_fails.
   # The install runs on_install first, when there is one (WordPress writing wp-content/ as it installs); with
   # install_already, it finds WordPress installed already, as WP-CLI says it then (and succeeds).
-  up | "up "*) exit 0 ;;
-  "exec "*"wp core is-installed") [ -f "$STUB_DIR/wp_not_installed" ] && exit 1; exit 0 ;;
+  # (on_up: what starting the containers does to the site folder: WordPress's image puts plugins of its own in
+  # wp-content/plugins. And asked whether it is installed before it is, WordPress complains, on both streams.)
+  up | "up "*) [ -f "$STUB_DIR/on_up" ] && /bin/sh "$STUB_DIR/on_up"; exit 0 ;;
+  "exec "*"wp core is-installed")
+    if [ -f "$STUB_DIR/wp_not_installed" ]; then
+      echo 'Warning: Undefined array key "HTTP_HOST" in /var/www/html/wp-includes/functions.php on line 6473'
+      echo 'PHP Warning:  Undefined array key "HTTP_HOST" in /var/www/html/wp-includes/functions.php on line 6473' >&2
+      exit 1
+    fi
+    exit 0 ;;
   "exec "*"wp core install "*) rm -f "$STUB_DIR/wp_not_installed"
     [ -f "$STUB_DIR/on_install" ] && /bin/sh "$STUB_DIR/on_install"
     if [ -f "$STUB_DIR/install_already" ]; then echo "WordPress is already installed."; else echo "Success: WordPress installed successfully."; fi
@@ -378,6 +386,14 @@ pub --dry-run; t="warnings with quotes, backslashes and non-ASCII"
 check "$t: exits 0" 0 "$code"; valid "$t"
 want="$(php -r 'echo json_encode( array( "Warning: she said \"hi\" and C:\\path\\x and caf\u{e9} \u{2713} </script>", "Warning: second" ), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES );')"
 check "$t: warnings array" "$want" "$(js warnings)"
+# A publish's warnings are for the owner at the terminal too, not only for the admin bar: each on a line of its own,
+# after the last status line, with no control character of WordPress's in it.
+newcase; pub --no-push; t="a publish with no warning"
+check "$t: the last line is the status" "[checking] Committed, not pushed (--no-push)." "$(printf '%s\n' "$out" | tail -n 1)"
+newcase; printf 'Warning: w1\nWarning: bell\007 and escape\033[31m\nExported 4 files, 200 bytes.\n' > "$S/export_stdout"; pub --no-push; t="a publish with two warnings, at the terminal"
+check "$t: both are printed after the last status line, their control characters as ?" "[checking] Committed, not pushed (--no-push).|  Warning: w1|  Warning: bell? and escape?[31m" "$(printf '%s\n' "$out" | tail -n 3 | paste -sd'|' -)"
+newcase; printf 'Warning: w1\nError: Could not fetch /hello/\n' > "$S/export_stdout"; echo 1 > "$S/export_exit"; pub --no-push; t="a publish that fails, with a warning"
+check "$t: the warning is printed after the failure" "  Warning: w1" "$(printf '%s\n' "$out" | tail -n 1)"
 newcase; printf 'Warning: w1\nExported 4 files, 200 bytes.\n' > "$S/export_stdout"; pub; t="a warning on a full run"
 check "$t: live" live "$(js state)"; check "$t: warnings kept to the end" '["Warning: w1"]' "$(js warnings)"
 
@@ -884,6 +900,7 @@ check "$t: exits 0" 0 "$code"
 check "$t: the commit holds only the encrypted backup" "backup/db.sql.age" "$(git -C "$c" ls-tree -r --name-only HEAD -- backup)"
 check "$t: backup/db.sql is gone from the folder" no "$([ -e "$c/backup/db.sql" ] && echo yes || echo no)"
 contains "$t: the owner is told about earlier commits" "$history" "$(js warnings)"
+check "$t: at the terminal too, after the last line" "  $history" "$(printf '%s\n' "$out" | tail -n 1)"
 check "$t: told once" 1 "$(js warnings | grep -o 'Earlier commits' | wc -l | tr -d ' ')"
 printf -- '-- MariaDB dump\nINSERT INTO t VALUES (3);\n\n-- Dump completed\n' > "$S/dump_body"; pub --no-push; t="that site's next publish"
 check "$t: exits 0" 0 "$code"; check "$t: no such warning again" 0 "$(js warnings | grep -c 'Earlier commits')"
@@ -1360,6 +1377,56 @@ setup_wp; t="offprint setup-wp, WordPress installed already, run again"
 check "$t: works, no new commit" "0|$((commits0 + 1))" "$code|$(git -C "$c" rev-list --count HEAD)"
 contains "$t: says it is committed already" "The plugin copy is committed already." "$out"
 # An install that finds WordPress installed already (WP-CLI says so, and succeeds) didn't install it: post 2 is left alone.
+# Asked whether it is installed before it is, WordPress complains (an undefined HTTP_HOST), on both streams: nothing of
+# that question is shown.
+fresh_wp "$sample"; setup_wp; t="offprint setup-wp, installing WordPress, asked first whether it is installed"
+check "control ($t): it was asked" 1 "$(grep -c 'wp core is-installed' "$S/docker.calls")"
+check "$t: WordPress's complaint is not shown" 0 "$(printf '%s\n' "$out" | grep -c 'HTTP_HOST')"
+
+# Installing WordPress, and deleting its Sample Page, each ask for a publish (the plugin's hooks), on a site that has
+# nothing to publish yet and, with no agent, would say "Publish requested" until one is installed, which would then
+# publish at once. On a WordPress this run installed, a request found at the end is set-up's own, and goes; on one
+# found installed, a request is the owner's, and stays.
+removed_msg="Removed the publish request that installing WordPress made (var/inbox/publish-request): the first publish is yours to start."
+fresh_wp "$sample"; printf 'mkdir -p "%s/var/inbox" && echo "2026-11-26T17:27:53Z post 2" > "%s/var/inbox/publish-request"\n' "$c" "$c" > "$S/on_install"; setup_wp; t="offprint setup-wp, installing WordPress, which asks for a publish"
+check "$t: works" 0 "$code"; check "$t: the request is gone" no "$([ -e "$c/var/inbox/publish-request" ] && echo yes || echo no)"
+contains "$t: says so" "$removed_msg" "$out"
+fresh_wp "$sample"; setup_wp; t="offprint setup-wp, installing WordPress, no request made"
+check "$t: nothing is said of one" 0 "$(printf '%s\n' "$out" | grep -c 'publish request')"
+bare_newcase; echo "$c" > "$S/containers"; mkdir -p "$c/var/inbox"; echo "2026-11-26T10:00:00Z post 7" > "$c/var/inbox/publish-request"; setup_wp; t="offprint setup-wp, WordPress installed already, a request waiting"
+check "$t: works" 0 "$code"; check "$t: the request is the owner's, and stays" "2026-11-26T10:00:00Z post 7" "$(cat "$c/var/inbox/publish-request" 2>&1)"
+check "$t: nothing is said of it" 0 "$(printf '%s\n' "$out" | grep -c 'publish request')"
+# WordPress can write var/inbox: a link at the request's name is removed as a link, never followed.
+fresh_wp "$sample"; echo keep > "$tmp/case$n/victim"; printf 'mkdir -p "%s/var/inbox" && ln -s "%s" "%s/var/inbox/publish-request"\n' "$c" "$tmp/case$n/victim" "$c" > "$S/on_install"; setup_wp; t="offprint setup-wp, installing WordPress, a link where the request would be"
+check "$t: works" 0 "$code"; check "$t: the link is gone, what it led to is not" "no|keep" "$([ -L "$c/var/inbox/publish-request" ] && echo yes || echo no)|$(cat "$tmp/case$n/victim")"
+fresh_wp "$sample"; printf 'mkdir -p "%s/var/inbox/publish-request/sub"\n' "$c" > "$S/on_install"; setup_wp; t="offprint setup-wp, installing WordPress, a folder where the request would be"
+check "$t: works" 0 "$code"; check "$t: the folder is left, and nothing is claimed" "yes|0" "$([ -d "$c/var/inbox/publish-request/sub" ] && echo yes)|$(printf '%s\n' "$out" | grep -c 'Removed the publish request')"
+
+# WordPress's image puts plugins of its own into wp-content/plugins when its container first starts, and a publish
+# commits whatever is there. Set-up says which appeared during this run, and the command that deletes them; it deletes
+# nothing, and knows none by name (it compares the folder before and after).
+fresh_wp "$sample"; mkdir -p "$c/wp-content/plugins/mine"; echo '<?php' > "$c/wp-content/plugins/mine/mine.php"; echo '<?php // Silence is golden.' > "$c/wp-content/plugins/index.php"
+printf 'mkdir -p "%s/wp-content/plugins/their-plugin" && echo "<?php" > "%s/wp-content/plugins/their-plugin/x.php" && echo "<?php" > "%s/wp-content/plugins/single.php" && echo "<?php" > "%s/wp-content/plugins/index.php"\n' "$c" "$c" "$c" "$c" > "$S/on_up"
+setup_wp; t="offprint setup-wp, WordPress's image adds plugins of its own"
+check "$t: works" 0 "$code"
+contains "$t: says which, and how to delete them" "WordPress put plugins of its own in wp-content/plugins: single.php their-plugin. A publish commits whatever is there; if you don't want them: offprint wp plugin delete single their-plugin" "$out"
+check "$t: the owner's own plugin is not named" 0 "$(printf '%s\n' "$out" | grep -c 'plugin delete.*mine')"
+check "$t: nothing was deleted" "index.php mine single.php their-plugin" "$(ls "$c/wp-content/plugins" | paste -sd' ' -)"
+check "$t: WP-CLI was not asked to delete a plugin" 0 "$(grep -c 'wp plugin delete' "$S/docker.calls")"
+setup_wp; t="offprint setup-wp again, nothing new in wp-content/plugins"
+check "$t: nothing is said of plugins" 0 "$(printf '%s\n' "$out" | grep -c 'plugins of its own')"
+fresh_wp "$sample"; setup_wp; t="offprint setup-wp, no plugin added"
+check "$t: nothing is said of plugins" 0 "$(printf '%s\n' "$out" | grep -c 'plugins of its own')"
+# A name WordPress chose is shown only when it is plain; another is counted, never printed.
+fresh_wp "$sample"; printf 'mkdir -p "%s/wp-content/plugins/ok-one" "%s/wp-content/plugins/a b; touch ran"\n' "$c" "$c" > "$S/on_up"; setup_wp; t="offprint setup-wp, an added plugin with a name that is no slug"
+contains "$t: the plain one is named, the other only counted" "WordPress put plugins of its own in wp-content/plugins: ok-one (and 1 more, whose name is not shown). A publish commits whatever is there; if you don't want them: offprint wp plugin delete ok-one" "$out"
+check "$t: its name is not printed" 0 "$(printf '%s\n' "$out" | grep -c 'touch ran')"
+# The line is one the owner may paste: a name that would be read as an option to WP-CLI (--all deletes every plugin) is
+# never part of it.
+fresh_wp "$sample"; printf 'mkdir -p "%s/wp-content/plugins/ok-one" "%s/wp-content/plugins/--all" "%s/wp-content/plugins/-x"\n' "$c" "$c" "$c" > "$S/on_up"; setup_wp; t="offprint setup-wp, added plugins whose names start with a dash"
+contains "$t: only the plain one is in the line to paste" "WordPress put plugins of its own in wp-content/plugins: ok-one (and 2 more, whose name is not shown). A publish commits whatever is there; if you don't want them: offprint wp plugin delete ok-one" "$out"
+check "$t: no option is in it" 0 "$(printf '%s\n' "$out" | grep -c -- '--all')"
+
 fresh_wp "$sample"; touch "$S/install_already"; setup_wp; t="offprint setup-wp, is-installed fails, then the install finds WordPress installed already"
 check "$t: works" 0 "$code"; contains "$t: WP-CLI's line shown" "WordPress is already installed." "$out"
 check "$t: post 2 neither looked at nor deleted" "" "$(grep 'wp post' "$S/docker.calls")"

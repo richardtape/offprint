@@ -56,6 +56,13 @@ echo "Making the throwaway WordPress (a minute or two)..."
 ( cd "$site" && OFFPRINT_SITE="$site" WP_ADMIN_USER=real-admin WP_ADMIN_EMAIL=admin@example.com \
   WP_ADMIN_PASSWORD="$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24)" /bin/bash "$SRC/bin/offprint" setup-wp ) > "$work/setup.out" 2>&1 \
   || { tail -20 "$work/setup.out"; echo "offprint setup-wp failed."; exit 1; }
+# What a real set-up shows of three things the stand-ins only imitate: WordPress's image adds plugins of its own, which
+# set-up names; installing WordPress asks for a publish, which set-up takes back; and WordPress's complaint at being
+# asked whether it is installed is not shown.
+contains "setup-wp names the plugins WordPress's image added, and how to delete them" "WordPress put plugins of its own in wp-content/plugins: " "$(cat "$work/setup.out")"
+contains "... with the delete command" "if you don't want them: offprint wp plugin delete " "$(cat "$work/setup.out")"
+check "setup-wp leaves no publish request waiting on a new site" no "$([ -e "$site/var/inbox/publish-request" ] || [ -L "$site/var/inbox/publish-request" ] && echo yes || echo no)"
+check "setup-wp shows nothing of WordPress's HTTP_HOST complaint" 0 "$(grep -c 'HTTP_HOST' "$work/setup.out")"
 wp() { op wp "$@" < /dev/null; }
 titles() { wp post list --post_type=post --post_status=publish --field=post_title 2> /dev/null | sort | paste -sd'|' -; }
 # Before anything is changed: the site the commands act on must be the throwaway, by its compose project.

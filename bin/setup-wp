@@ -5,6 +5,9 @@
 # name and email address come from WP_ADMIN_USER and WP_ADMIN_EMAIL, or are asked for; the password is asked for,
 # never stored (for a non-interactive run set WP_ADMIN_PASSWORD too). The site's title is WP_TITLE, or the site's
 # name from site.json.
+# On a WordPress this run installed, the publish request that installing it made (var/inbox/publish-request) is removed,
+# so the first publish is the owner's to start; and the plugins WordPress's image put into wp-content/plugins during
+# this run are named, with the command that deletes them (none is deleted here).
 # It then takes away the two traps of a first publish, saying one line for each. On a WordPress this run installed
 # (WP-CLI said "Success:"; not one it found installed), WordPress's Sample Page, which links to /wp-admin/ (the export
 # checks refuse that), is deleted when it is post 2 and was never changed. And on any run, the plugin, which a publish
@@ -44,6 +47,10 @@ if [ ! -f wp-content/mu-plugins/offprint.php ]; then
   cp -R "$TOOL/plugin/offprint.php" "$TOOL/plugin/offprint" wp-content/mu-plugins/
 fi
 
+# What is in wp-content/plugins before the containers start: WordPress's image puts plugins of its own there when its
+# container first starts, and what appeared is said at the end (see "plugins WordPress added").
+plugins_before="$(ls -A wp-content/plugins 2> /dev/null || true)"
+
 dc up -d --build --wait db wordpress
 dc up -d caddy
 
@@ -51,7 +58,9 @@ nl='
 '
 tab="$(printf '\t')"
 installed_now=0
-if wp_cli core is-installed 2>/dev/null; then
+# (Asked before it is installed, WordPress complains of an undefined HTTP_HOST, on standard output when bin/wp has a
+# terminal: so nothing of this question is shown, and it is asked with none.)
+if wp_cli core is-installed > /dev/null 2>&1 < /dev/null; then
   echo "WordPress is already installed."
 else
   user="${WP_ADMIN_USER:-}"
@@ -111,6 +120,45 @@ if [ "$installed_now" = 1 ]; then
   else
     echo "No untouched Sample Page to delete (post 2 isn't a page with the slug sample-page that was never changed)."
   fi
+fi
+
+# --- the publish request installing WordPress made ---
+# The plugin asks for a publish when a post is published or deleted, and installing WordPress does both (its first
+# post; its Sample Page, deleted above). On a WordPress this run installed there is nothing to publish yet, and with no
+# agent the admin bar would say "Publish requested" until one is installed, which would then publish at once. So a
+# request found now is set-up's own, and goes. On a WordPress found installed, a request is the owner's: left alone.
+# WordPress can write var/inbox: what is at the request's name is removed by name (a link as a link, never followed),
+# and a folder there is left as it is.
+request=var/inbox/publish-request
+if [ "$installed_now" = 1 ] && { [ -e "$request" ] || [ -L "$request" ]; }; then
+  if [ -L "$request" ] || [ ! -d "$request" ]; then rm -f -- "$request" 2> /dev/null || true; fi
+  if [ ! -e "$request" ] && [ ! -L "$request" ]; then
+    echo "Removed the publish request that installing WordPress made (var/inbox/publish-request): the first publish is yours to start."
+  fi
+fi
+
+# --- plugins WordPress added ---
+# Whatever is in wp-content/plugins now and was not before the containers started was put there by WordPress's image
+# (it ships with a plugin or two). A publish commits wp-content/ whole, so the owner is told which, with the command
+# that deletes them. Nothing is deleted here, and none is known by name: the folder is compared with itself. A name is
+# WordPress's to choose, so only a plain one (letters, digits, dot, dash, underscore) is printed; any other is counted.
+# One starting with a dash is not plain: the line printed is one the owner may paste, and there it would be read as an
+# option (--all deletes every plugin).
+added=""; slugs=""; odd=0
+for f in wp-content/plugins/* wp-content/plugins/.[!.]*; do
+  [ -e "$f" ] || [ -L "$f" ] || continue
+  n="${f##*/}"
+  [ "$n" != index.php ] || continue
+  case "$nl$plugins_before$nl" in *"$nl$n$nl"*) continue ;; esac
+  case "$n" in
+    .* | -* | *[!A-Za-z0-9._-]*) odd=$((odd + 1)) ;;
+    *) added="${added:+$added }$n"; slugs="${slugs:+$slugs }${n%.php}" ;;
+  esac
+done
+if [ -n "$added" ] || [ "$odd" -gt 0 ]; then
+  more=""; [ "$odd" = 0 ] || more=" (and $odd more, whose name is not shown)"
+  line="WordPress put plugins of its own in wp-content/plugins: ${added:-none with a plain name}$more. A publish commits whatever is there"
+  if [ -n "$slugs" ]; then echo "$line; if you don't want them: offprint wp plugin delete $slugs"; else echo "$line."; fi
 fi
 
 # --- the plugin, committed ---

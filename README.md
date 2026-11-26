@@ -231,7 +231,10 @@ site folder.
    installed, it deletes WordPress's "Sample Page" (post 2, untouched), which links to `/wp-admin/`, a link the checks
    refuse; and it commits the plugin, alone, as "Offprint's plugin" (a publish refuses while the plugin copy has
    uncommitted changes, and commits no plugin but this Offprint's own). When it can't commit it (no git identity, or
-   something else staged), it says what to do. It ends with
+   something else staged), it says what to do. WordPress ships with a plugin or two, which its container puts into
+   `wp-content/plugins/`: set-up names any that appeared, with the command that deletes them, since a publish commits
+   whatever is there. And it removes the publish request that installing WordPress itself made, so nothing is
+   published until you say. It ends with
    "Done: https://mysite.local/  (admin: https://mysite.local/wp-admin/)".
 4. Give the site its backup key, as `offprint new` said: run `age-keygen`, keep the private key it prints
    (`AGE-SECRET-KEY-…`) in your password manager, add the public one (`age1…`) to `site.json` as

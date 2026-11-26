@@ -172,16 +172,14 @@ Check each is still true before relying on it or fixing it.
 - Run for real on 26 November 2026, on two sites of the owner's: a publish with the encrypted backup, `offprint backup
   verify` at a terminal, and a whole move of an existing site onto the tool (a site's own adapter for a
   push-then-workflow deploy, `host-setup`, `setup-wp`, the restore, a publish to "Live", and a publish started by the
-  agent). What that showed, none of it fixed yet:
-  - A publish's warnings go to `var/status.json` and the admin bar, not to the terminal: a one-time warning (earlier
-    commits holding a readable dump) is easy to miss.
-  - `offprint setup-wp` deletes the Sample Page, which asks for a publish: a site that has never published shows
-    "Publish requested" until an agent is installed, and the agent then publishes at once.
-  - A fresh WordPress puts the Akismet and Hello Dolly plugins in `wp-content/plugins/`, and the first publish commits
-    them. The owner has to delete them (`offprint wp plugin delete akismet hello`).
-  - `offprint setup-wp` prints a PHP warning (`Undefined array key "HTTP_HOST"`) before it installs WordPress.
+  agent). It showed four rough edges, since fixed (a publish's warnings were not printed at the terminal; set-up
+  left its own publish request waiting; set-up said nothing of the plugins WordPress's image adds; set-up printed
+  WordPress's `HTTP_HOST` complaint), and one that is not:
   - A publish in which only the database changed still commits a whole new encrypted backup, which git cannot store
-    as a difference: a site's repository grows by the backup's size each time.
+    as a difference: a site's repository grows by the backup's size each time. The fix is a second place to send the
+    backup, which is not built.
+- `offprint setup-wp` names the plugins WordPress's image added but deletes none: a first publish commits them unless
+  the owner runs the line it prints.
 - The backup can only be sent to the site's own repository (`backup.to` is `repo`). `bin/publish` makes it in one
   step and sends it in another, so that a second place is an addition.
 - There is no release tag yet.

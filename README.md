@@ -35,7 +35,7 @@ flowchart LR
     S1["site.json"]
     S2["site/: the static copy"]
     S3["wp-content/"]
-    S4["backup/db.sql"]
+    S4["backup/db.sql.age"]
     S5["var/: status, log, export and inbox, not committed"]
   end
   subgraph MAC["On the Mac"]
@@ -63,7 +63,7 @@ flowchart LR
 
 The tool is this repository: the scripts, the host adapters, the WordPress plugin, the Docker templates and the tests.
 It never holds a site's content, uploads or database dump. A site is a separate folder and its own private git
-repository. It holds `site.json`, `site/` (the static copy), `wp-content/`, `backup/` (the database dump), `var/`
+repository. It holds `site.json`, `site/` (the static copy), `wp-content/`, `backup/` (the database dump, encrypted), `var/`
 (status, log, export and inbox; not committed) and `local/certs/` (the local TLS certificate; not committed). Run
 `offprint` from inside a site folder, or set `OFFPRINT_SITE` to it. More in
 [docs/how-it-fits-together.md](docs/how-it-fits-together.md).
@@ -82,7 +82,7 @@ flowchart LR
     D["offprint publish asks WordPress to export itself"]
     F["The export is copied to a private folder, site.new"]
     G["The checks"]
-    H["site/ replaced, database dumped to backup/db.sql"]
+    H["site/ replaced, database dumped, encrypted to backup/db.sql.age"]
     I["One commit from a private index"]
     J["Push to the private repository"]
     K["Nothing is published, and the admin bar says why"]
@@ -117,7 +117,9 @@ flowchart LR
    files, none of the files the publish or the host writes at the root (for Cloudflare: `offprint.json`, `_headers`
    and `_redirects`), nor one the host would read as its own (`.assetsignore`, `_worker.js`), and the host's limits.
    If it refuses, nothing is published and the admin bar says why.
-4. `site/` is replaced by the copy, and the database is dumped to `backup/db.sql`.
+4. `site/` is replaced by the copy. The database is dumped, and the dump is encrypted with `age` to the public keys
+   in `site.json`'s `backup` block, as `backup/db.sql.age`: no readable dump is committed. (See
+   [The database backup](#the-database-backup).)
 5. One commit is made of `site/`, `wp-content/` and `backup/`, with `git commit-tree`, so no commit hooks run. It is
    refused unless the plugin in it is exactly this Offprint's own.
 6. The commit is pushed to `origin`. Then the site's host adapter makes it live: `cloudflare-workers` uploads exactly
@@ -145,7 +147,8 @@ you, as it would for any command you run.
 | WordPress changes Offprint's plugin, which it runs from its copy in `wp-content/mu-plugins/` and can write there, so that a publish commits the change with the rest of `wp-content/`. | A publish refuses uncommitted changes to the copy before the export, and, once the commit is built, refuses unless the plugin in it is exactly this Offprint's own `plugin/`: each file's bytes and executable bit, and no other file. It names the first path that differs and says what to do; nothing is committed. A dry run compares the copy on disk the same way, never through a link. Not stopped: WordPress can still change the copy it runs between publishes, and another plugin in the same PHP process can change what the exporter writes; that is why the checks on the Mac, which read only the private copy, are the gate. |
 | A page links to `wp-admin`, `wp-login.php`, XML-RPC or the REST API, or mentions the local hostname. | `bin/check-site` refuses. |
 | WordPress writes a file the Mac later reads: a `site.json` in `wp-content`, or a bad publish request. | A `site.json` inside another site folder is refused. A request is moved out first, must be a plain file of at most 1 KB, and only its first 200 bytes are read, as data. |
-| The repository holding `backup/db.sql` (drafts, password hashes) and every upload is public. | `offprint publish` asks `gh` and refuses to push. If `gh` is missing or does not answer, it warns instead. |
+| The repository holding every upload (and, in commits made before the backup was encrypted, a readable `backup/db.sql`: drafts, password hashes) is public. | `offprint publish` asks `gh` and refuses to push. If `gh` is missing or does not answer, it warns instead. |
+| Whoever can read the site's repository reads the database: drafts, password hashes, commenters' email addresses. | The backup is committed only encrypted (`backup/db.sql.age`), to public keys in `site.json`; a publish refuses when there is none, or no `age` to encrypt with. The private key is yours, and Offprint never holds it. `wp-content/` (uploads, themes, plugins) is still committed as it is. |
 | What wrangler prints goes to `var/publish.log`, which WordPress can read: the token, should it ever print it; and, when Cloudflare refuses the token for the account, the name and id of every account the token can see (a real account's name held its owner's email address), and, when the token lacks User Details Read, who is logged in. | The adapter's filter replaces the token's value with `[token hidden]`. It leaves out, on every stream, each line that starts (after any spaces) with a box-drawing character of a table (`┌ │ ├ └`) or with 👋, and everything from a line that is exactly "Getting User settings..." to the end of the table that follows it (to the end of that stream when the table never closes). It writes one line in place of what a stream had left out. Nothing else of wrangler's is left out: a line that only holds those words (an uploaded file's name) is kept. |
 | Another site or service already uses an address, host name, port, launchd label or Docker compose project. | `host-setup` refuses before changing anything, and every command that runs Docker compose refuses a project that is not this site's. |
 | A program WordPress put in `wp-content/` or `var/` is found on the PATH: through `.`, an empty or a relative entry (each is whatever folder a command runs in), or an entry that is in the site folder, or leads into it through links, when the command looks it up. It would run as you, so it could read the Keychain item itself. | Every Offprint command starts `#!/bin/bash` and runs the tool's other scripts with `/bin/bash`, never a bash the PATH finds. Before anything is looked up on the PATH, it leaves out each entry that is empty, relative, or in the site folder or leads into it, says which in one line, and never leaves the PATH empty (`/usr/bin:/bin:/usr/sbin:/sbin` when nothing is left). The site folder is the one it is run in or below, or `OFFPRINT_SITE` (for `host-setup` and `host-undo`, also the folder named on their command line), and inside is asked of the disk. An entry `~` or `~/...` is your `HOME`'s, as bash takes it, when `HOME` is an absolute path with no colon in it; otherwise it is left out, and named. It also leaves out, without a word, each entry that can't be entered when it starts (not there, a link to nothing, a folder closed to you): it runs nothing then, and nothing made or opened there later can be reached through it. One that leads to a folder with a colon in its name (a Finder name with a `/` in it, say) is left out too, as a colon can't be written in a PATH, and named, with that reason. Each entry it keeps is kept as the folder it leads to then, on disk, not as its name; so is `TMPDIR`, which is refused when it is in the site folder or can't be entered. So a link on the way that WordPress points elsewhere later changes nothing. As a second layer, set-up, doctor and a publish never run a node, npm or wrangler in the site folder, nor hand the token to a curl or Cloudflare's answer to a php there. Not stopped: an absolute entry outside the site folder (another site's `wp-content/`, say) is yours to keep clean, as for any command. And at the moment of the check, a link in a folder WordPress can write, on the way of an entry or of `TMPDIR`, can make it lead to any folder outside the site folder that is there at that moment, another site's folders (its `wp-content/`, say) included: a PATH or `TMPDIR` that passes through the site folder is your choice. |
@@ -159,7 +162,8 @@ Worker, and step 6 lets WordPress ask for a publish by itself.
 
 You need, on your Mac: git, with `user.name` and `user.email` set; php 8.1 or newer (`brew install php`; the
 tool's own PHP tests need 8.3); Docker with Compose, running (Docker Desktop is what Offprint has been used with;
-other Docker set-ups are untried); mkcert (`brew install mkcert`), with `mkcert -install` run once; and an
+other Docker set-ups are untried); mkcert (`brew install mkcert`), with `mkcert -install` run once; age
+(`brew install age`), which encrypts the database backup; and an
 administrator account, for the one `sudo` step. To publish: a private GitHub repository for the site, and GitHub's `gh`, signed in
 (`gh auth login`), so that a publish can check the repository is private (without `gh` it only warns). For Cloudflare:
 a Cloudflare account, and node 22.12.0 or newer, with its npm.
@@ -209,6 +213,10 @@ site folder.
      offprint host-setup          (prints the sudo line to run)
      offprint setup-wp
      offprint publish --dry-run
+   Before the first publish (a dry run too), give the site a backup key:
+     age-keygen                 # prints a private key (AGE-SECRET-KEY-…) and its public key (age1…)
+     # keep the private key in your password manager, not on this Mac alone
+     # then add to site.json:  "backup": {"recipients": ["age1…"]}
    Run offprint host-setup for this site before making another: until then its address and ports are not yet taken on this Mac.
    To publish to a host, add an adapter block to site.json: see the README.
    ```
@@ -225,8 +233,11 @@ site folder.
    uncommitted changes, and commits no plugin but this Offprint's own). When it can't commit it (no git identity, or
    something else staged), it says what to do. It ends with
    "Done: https://mysite.local/  (admin: https://mysite.local/wp-admin/)".
-4. `offprint publish --dry-run` exports and checks the site, changing nothing else. Then `offprint publish --no-push`
-   commits it.
+4. Give the site its backup key, as `offprint new` said: run `age-keygen`, keep the private key it prints
+   (`AGE-SECRET-KEY-…`) in your password manager, add the public one (`age1…`) to `site.json` as
+   `"backup": {"recipients": ["age1…"]}`, and commit `site.json`. A publish refuses until this is done (see
+   [The database backup](#the-database-backup)). `offprint publish --dry-run` then exports and checks the site,
+   changing nothing else, and `offprint publish --no-push` commits it.
 5. To publish, give the site an `origin` it can push to: a private repository, as the publish refuses a public one
    (`gh repo create mysite --private --source=. --remote=origin` makes one on GitHub). With no `adapter` block,
    `offprint publish` then commits and pushes, and ends "[saved] Committed and pushed ...": the site has no host. To
@@ -278,6 +289,7 @@ starting `site.json: "<field>"`.
 | `http_port` | yes | A JSON integer, 1024 to 65535, different from `tls_port`. | none |
 | `agent_label` | no | Letters, digits, dots and dashes, starting with a letter or digit, at most 100 characters. | `local.offprint.NAME.publish` |
 | `daemon_prefix` | no | The same rule as `agent_label`. | `local.offprint.NAME` |
+| `backup` | no, but a publish refuses without it | Who the database backup is encrypted to: an object, `{"recipients": ["age1…"]}`, with one or two age public keys (each `age1` and 58 more characters), not the same one twice. Its only other key is `"to"`, where the backup is sent: `"repo"` (the site's own repository) is the one place there is. | none |
 | `adapter` | no | The site's host adapter: an object, `{"name": "NAME", ...}`. NAME is lowercase letters, digits and dashes, starting with a letter, at most 41 characters: an adapter in the tool's `adapters/`, or else in the site folder's own `adapters/`, committed. Its other keys are the adapter's settings, at most 20, each named with lowercase letters, digits and underscores, starting with a letter, at most 41 characters, and each a string of 1 to 200 letters, digits and `. _ : / @ + = -`, or an integer from 0 to 2147483647; the adapter checks them itself. | `{"name": "none"}` |
 
 A hostname is at most 253 characters, each label at most 63. An example:
@@ -291,9 +303,54 @@ A hostname is at most 253 characters, each label at most 63. An example:
   "local_ip4": "127.0.0.9",
   "local_ip6": "fd00::9",
   "tls_port": 4999,
-  "http_port": 4998
+  "http_port": 4998,
+  "backup": {"recipients": ["age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"]}
 }
 ```
+
+### The database backup
+
+Every publish dumps the site's database and commits it, so the site's repository is a backup of the whole WordPress:
+posts, drafts, settings and comments are nowhere else but on your Mac. The dump holds drafts, password hashes and
+email addresses, so it is committed only encrypted, as `backup/db.sql.age`, with [age](https://age-encryption.org) to
+the public keys in `site.json`. A publish needs no secret for this, and Offprint never stores the private key: the
+backup is for the day the Mac is lost, and a key kept only on that Mac would be lost with it.
+
+To set it up:
+
+1. `brew install age`.
+2. Run `age-keygen`. It prints a private key (a line starting `AGE-SECRET-KEY-`) and its public key (`age1…`). Save
+   the private key in your password manager. Do not keep it in a file in the site folder, and do not commit it.
+3. Add the public key to `site.json`, and commit it:
+
+   ```json
+   "backup": {"recipients": ["age1…"]}
+   ```
+
+   A second public key in the list is a spare: the backup then opens with either private key. Whoever loses every
+   private key has lost the backup; nothing can open it then.
+4. After a publish, `offprint backup verify` asks for the private key (it is not shown as you paste it, and is not
+   stored), and says whether the backup in the last commit opens with it and is a whole dump. Run it once now, and
+   again whenever you change the keys: it is how you find out a backup is no use before the day you need it.
+
+A publish refuses, before exporting anything, when `site.json` has no `backup` block or there is no `age` on the PATH.
+When the database has not changed since the last publish, and nor have the recipients, the committed backup is kept
+as it is (age's output differs every time, so encrypting again would make a commit of every publish).
+
+**A site made before the backup was encrypted** must be given a `backup` block before its next publish. That publish
+takes the readable `backup/db.sql` out of the commit and the folder, and warns once that earlier commits still hold
+it: a publish never rewrites history, so whether to remove it from the repository's past is yours to decide.
+
+**Restoring** is by hand; there is no command for it yet. In the site folder, with its WordPress running:
+
+```
+age -d -i - backup/db.sql.age | offprint wp db import -
+```
+
+`age` waits for the private key: paste it and press Return. This replaces the local WordPress's whole database with
+the backup's. It has not been made a command or tested as one.
+
+`wp-content/` (uploads, themes, plugins) is committed as it is, not encrypted.
 
 ### Commands
 
@@ -317,6 +374,8 @@ usage: offprint COMMAND [ARGS...]
   offprint host-undo [--print]               take this site's host set-up away again, and nothing else
   offprint check DIR                         run the export checks on DIR, as a publish runs them (the site's hosts,
                                              and its adapter's file names and limits)
+  offprint backup verify                     check that the committed database backup opens with your key (asks
+                                             for the key; it is never stored) and is a whole dump
   offprint adapter setup [--yes]             set up on this Mac what the site's host adapter needs (each step says
                                              what it will do, and asks first; --yes: yes to each)
   offprint adapter doctor                    check what the site's host adapter needs, and the live site: one ok or
@@ -476,12 +535,16 @@ it. Its last line is the table's row. It needs Docker and the network (the plugi
 | `hosts-block.sh` | `bash tests/hosts-block.test.sh` | no | yes |
 | `host-setup`, `host-undo` | `bash tests/host.test.sh` | no (a pretend machine) | yes |
 | `site.json` loader | `bash tests/config.test.sh` | no | yes |
+| `offprint backup verify` | `bash tests/backup.test.sh` | no (a stand-in `age`) | yes |
 | Names that must not be in the tool | `bash tests/names.test.sh` | no | yes |
 | End to end | `bash tests/e2e.sh` | yes | no |
 | A plugin that replaces WordPress's sitemaps | `bash tests/compat-seo.sh SLUG` | yes, and the network | no |
+| The backup, with the real `age` | `bash tests/backup-real.sh` | no (but `age`, installed) | no |
 | A running site | `bash tests/site.test.sh SITE_DIR` | yes (a set-up site) | no |
 
-The first twelve need only bash, git, PHP, Perl and Node. `tests/e2e.sh` builds a throwaway WordPress in the compose
+The first thirteen need only bash, git, PHP, Perl and Node. The suites that publish use a stand-in `age`
+(`tests/fixtures/age-standin`); `tests/backup-real.sh` runs the real one the same ways, and is run on the Mac before a
+change to the backup is merged. `tests/e2e.sh` builds a throwaway WordPress in the compose
 project `offprint-e2e` and removes it afterwards; `tests/compat-seo.sh` builds the same one (`tests/e2e-setup.sh` is
 their shared set-up), so the two never run at the same time: each refuses to start while that project exists.
 `tests/site.test.sh` reads a real, running site and changes nothing.

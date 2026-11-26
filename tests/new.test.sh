@@ -160,6 +160,10 @@ Next, in this order:
   offprint host-setup          (prints the sudo line to run)
   offprint setup-wp
   offprint publish --dry-run
+Before the first publish (a dry run too), give the site a backup key:
+  age-keygen                 # prints a private key (AGE-SECRET-KEY-…) and its public key (age1…)
+  # keep the private key in your password manager, not on this Mac alone
+  # then add to site.json:  "backup": {"recipients": ["age1…"]}
 Run offprint host-setup for this site before making another: until then its address and ports are not yet taken on this Mac.
 To publish to a host, add an adapter block to site.json: see the README.'
 check "$t: what it says, on stdout" "$want_out" "$out"

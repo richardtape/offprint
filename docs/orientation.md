@@ -22,7 +22,7 @@ Most confusion comes from mixing these up.
 
 - **The tool** is this repository. It holds no site's content, ever.
 - **A site** is its own folder and its own private git repository: `site.json` (data that describes it), `site/`
-  (the static copy), `wp-content/`, `backup/db.sql`, and `var/` (status, log, the export in progress, an inbox;
+  (the static copy), `wp-content/`, `backup/db.sql.age` (the database, encrypted), and `var/` (status, log, the export in progress, an inbox;
   not committed). `offprint new` makes one. The tool is run from inside it.
 - **The Mac** holds what is neither: the Docker containers (WordPress, MariaDB, Caddy), a loopback address and a
   hostname for each site, a launchd agent for each site, and the host's API token in the login Keychain.
@@ -55,7 +55,9 @@ what it stops and a test that fails without it. Read the comment before changing
    not have. Each response is written once, exactly as it came, into the empty folder `var/export`.
 2. **Check.** `bin/check-site` refuses the export if any file links to `wp-admin`, the login page, XML-RPC or the
    REST API, holds the local hostname, has a name the host treats specially, or breaks the host's size limits.
-3. **Replace and back up.** `site/` is replaced by the export, and the database is dumped to `backup/db.sql`.
+3. **Replace and back up.** `site/` is replaced by the export. The database is dumped, and the dump is encrypted
+   with `age` to the public keys in `site.json` (`backup/db.sql.age`): no readable dump is ever committed, and the
+   private key is the owner's alone, never on this Mac's disk. A publish refuses when there is no key to encrypt to.
 4. **Commit and push.** One commit, built in a private git index. The plugin in it is compared with the tool's.
 5. **Deploy.** The site's host adapter uploads the commit's `site/` tree, copied out of git, not from disk.
 6. **Confirm.** The publish asks the live site which publish it is serving (`offprint.json`), and reports "Live"
@@ -162,6 +164,11 @@ Check each is still true before relying on it or fixing it.
 - Never run for real: `offprint new`'s address prompt, the README's `gh repo create` line, and a publish started
   by the agent while the login Keychain is locked.
 - Tried with Docker Desktop only. One SEO plugin measured (`tests/compat-seo.sh`; the README has the table).
+- `wp-content/` (uploads, themes, plugins) is committed unencrypted; only the database backup is encrypted.
+- There is no restore command: the README gives the two commands to run by hand, and they have not been tested as a
+  command would be. `offprint backup verify` proves the backup opens and is whole, not that it imports.
+- The backup can only be sent to the site's own repository (`backup.to` is `repo`). `bin/publish` makes it in one
+  step and sends it in another, so that a second place is an addition.
 - There is no release tag yet.
 
 ## Working with the owner

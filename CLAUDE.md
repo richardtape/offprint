@@ -12,14 +12,18 @@ the rules; that one is why they are the rules.
 bin/offprint                  the one entry point (see `bin/offprint help`); runs the script of the same job
 bin/new                       makes a new site folder outside every site and repo: site.json (addresses and ports no other
                               site on the Mac uses), .gitignore, the first commit
-bin/publish                   export, check, back up, commit, push, then the adapter's deploy, and wait for the live site
+bin/publish                   export, check, back up (the database dump, encrypted with age to site.json's backup
+                              recipients, as backup/db.sql.age), commit, push, then the adapter's deploy, and wait for
+                              the live site
+bin/backup                    offprint backup verify: the committed backup opens with the owner's key, and is a whole dump
 bin/publish-agent             what launchd runs when WordPress asks for a publish; takes var/inbox/publish-request
 bin/check-site                the export checks; bin/check-site-addresses.php does the link, image, form and feed checks
 bin/setup-wp                  makes a site's local WordPress (certificate, containers, install, options); on a WordPress it
                               installs, deletes the untouched Sample Page; on any run, commits the tool's own plugin/
                               (never the copy WordPress can write) when HEAD doesn't have it
 bin/wp                        WP-CLI inside the site's container
-lib/config.php                validates site.json, prints KEY<TAB>value lines or errors (exit 2)
+lib/config.php                validates site.json (its backup and adapter blocks too), prints KEY<TAB>value lines or errors
+                              (exit 2)
 lib/site.sh                   finds the site folder, loads config into SITE_* and ADAPTER_* variables, defines dc();
                               offprint_plugin_list, the tool's plugin/ as a commit holds it (setup-wp commits it, and a
                               publish refuses a commit whose plugin isn't exactly it)
@@ -39,6 +43,8 @@ docs/how-it-fits-together.md  the diagrams of what lives where and of a publish 
 docs/orientation.md           the picture for an agent new to the project: read it before a first change
 tests/                        every suite (tests/php, tests/fixtures, *.test.sh, *.test.js, e2e.sh, compat-seo.sh);
                               tests/fixtures/adapters/workflow is an adapter outside the tool, for tests/publish.test.sh;
+                              tests/fixtures/age-standin is the stand-in age every suite that publishes puts first on
+                              the PATH, and tests/backup-real.sh runs the real age the same ways (not in CI);
                               tests/e2e-setup.sh is the throwaway WordPress (compose project offprint-e2e) that e2e.sh and
                               compat-seo.sh (an SEO plugin's sitemaps, by its wordpress.org slug) both source
 .github/workflows/ci.yml      CI
@@ -68,7 +74,11 @@ tests/                        every suite (tests/php, tests/fixtures, *.test.sh,
   contract.
 - A token is never written to a file, a log, `var/status.json`, a process's argument or test output, nor traced by
   `set -x`. It travels on a pipe or in the environment of the one process that needs it; output that could hold it goes
-  through a filter that hides its value.
+  through a filter that hides its value. The database backup's private key is such a token, and is not Offprint's to
+  keep at all: a publish encrypts to public keys only, and `offprint backup verify` holds the key the owner types in one
+  shell variable, for one pipe to `age`.
+- The database dump is never committed, or left in `backup/`, readable: a publish refuses a site with no `backup` block
+  or no `age`, and the readable dump in `var/` is removed on every exit.
 - A `TMPDIR` that is the site folder or inside it, or can't be entered, is refused before any temporary file is made
   (`lib/site.sh`), and a private folder is never made there (`offprint_private_dir`).
 - `site.json` is parsed by `lib/config.php`, never sourced or `eval`ed. A name read from it must have matched a strict
@@ -78,8 +88,9 @@ tests/                        every suite (tests/php, tests/fixtures, *.test.sh,
 - Tests first. Test counts must never fall. Plain examples only: `example.com`, `mysite.local`, `127.0.0.9`, the Worker
   `my-site`, the account id `0123456789abcdef0123456789abcdef`.
 - Built: the adapters `none` and `cloudflare-workers` (`offprint adapter setup` and `doctor` set it up and check it);
-  `offprint new` (a site folder only: it runs no set-up). Not built: the `ssh` adapter; a top-level `setup`, `doctor` or
-  `upgrade`. Do not describe those as if they were.
+  `offprint new` (a site folder only: it runs no set-up); the encrypted database backup and `offprint backup verify`.
+  Not built: a restore command; any place to send the backup but the site's repository; the `ssh` adapter; a
+  top-level `setup`, `doctor` or `upgrade`. Do not describe those as if they were.
 
 ## Tests
 
@@ -88,7 +99,7 @@ composer install && vendor/bin/phpunit      # 262 tests
 node --test tests/*.test.js                 # 11 tests
 bash tests/check-site.test.sh               # 407
 bash tests/new.test.sh                      # 381
-bash tests/publish.test.sh                  # 1289 (slow: several minutes)
+bash tests/publish.test.sh                  # 1405 (slow: several minutes)
 bash tests/adapter.test.sh                  # 2183 (slow: several minutes)
 bash tests/secret.test.sh                   # 335
 bash tests/agent.test.sh                    # 305
@@ -96,15 +107,17 @@ bash tests/hosts-block.test.sh              # 4
 bash tests/host.test.sh                     # 780
 bash tests/config.test.sh                   # 275
 bash tests/names.test.sh                    # 9
+bash tests/backup.test.sh                   # 55
 bash tests/e2e.sh                           # 275; needs Docker; not in CI
 bash tests/compat-seo.sh wordpress-seo      # 6; needs Docker and the network; not in CI; never beside e2e.sh
+bash tests/backup-real.sh                   # 15; needs the real age (brew install age); not in CI
 bash tests/site.test.sh SITE_DIR            # needs a real, running site; not in CI
 ```
 
 The shell suites print one `ok` or `FAIL` line per case; the counts above are the `ok` lines on macOS. On Linux (CI)
 they differ: `check-site`, `publish`, `adapter`, `agent` and `host` print fewer, since the cases that need the Mac
 (`plutil`, or a disk that takes two letter cases for one name) are skipped there, with a `skip` line; `config` prints
-more, since some of its cases run again under a second bash. All but the last three are hermetic and run in CI.
+more, since some of its cases run again under a second bash. All but the last four are hermetic and run in CI.
 `tests/adapter.test.sh` (the adapter contract, both adapters, `offprint adapter setup` and `doctor`) and
 `tests/secret.test.sh` (`os/darwin/secret`) are the adapters' suites; `tests/new.test.sh` is `offprint new`'s (its
 setup-wp half, the Sample Page and the plugin commit, is in `tests/publish.test.sh`, with setup-wp's other cases). CI
@@ -133,5 +146,8 @@ the `plutil` and `install-agent` cases) are never run in CI. So run `check-site`
   it; they share it, so never run both at once (each refuses to start while it exists). Never point a test at a real
   site's compose project, folder, address or port.
 - `tests/site.test.sh` needs a real site and is not in CI.
+- No test runs the real `age` but `tests/backup-real.sh`, which makes its keys in shell variables only and touches no
+  site. Every other suite that reaches a publish or `offprint backup verify` has `tests/fixtures/age-standin` first on
+  the `PATH`. Run `tests/backup-real.sh` on the Mac before merging any change to the backup.
 - A push runs CI, on any branch. Wait for it to go green (`gh run watch`).
 - The repo is public. `main` is never rewritten or force-pushed: its commits must stay reachable.

@@ -21,7 +21,7 @@ flowchart LR
     S1["site.json"]
     S2["site/: the static copy"]
     S3["wp-content/"]
-    S4["backup/db.sql"]
+    S4["backup/db.sql.age"]
     S5["var/: status, log, export and inbox, not committed"]
   end
   subgraph MAC["On the Mac"]
@@ -70,7 +70,7 @@ flowchart LR
     D["offprint publish asks WordPress to export itself"]
     F["The export is copied to a private folder, site.new"]
     G["The checks"]
-    H["site/ replaced, database dumped to backup/db.sql"]
+    H["site/ replaced, database dumped, encrypted to backup/db.sql.age"]
     I["One commit from a private index"]
     J["Push to the private repository"]
     K["Nothing is published, and the admin bar says why"]

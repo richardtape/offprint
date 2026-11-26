@@ -515,6 +515,16 @@ those up. The Keychain helper (`os/darwin/secret`), which holds the token, is ru
 `/usr/bin/security`, never a bash or a security the PATH finds. Every other command Offprint runs is the one the rest of
 the PATH finds first: a program in an absolute entry outside the site folder runs as you, so keep those folders yours.
 
+### A site's own adapter
+
+A site whose host is neither of the two built in can bring its own adapter: a folder `adapters/NAME/` in the site
+folder, with `adapter.sh` in it, committed whole, and `"adapter": {"name": "NAME"}` in `site.json`. The header of
+`lib/adapter.sh` is the contract: which variables and functions an adapter may define, and what a publish does around
+them. An adapter that defines nothing but how to ask the live site which publish it serves is enough for a host that
+deploys by itself when the site's repository is pushed: `tests/fixtures/adapters/workflow/adapter.sh` is one, for a
+deploy workflow that writes `build.json`, naming the commit, at the root of the live site. The publish then pushes,
+and waits until the live site names the commit it pushed.
+
 ### The one privileged step
 
 `offprint host-setup`, with `offprint host-undo`, which reverses it, is the only thing in Offprint that runs as root,

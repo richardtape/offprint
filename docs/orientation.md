@@ -144,7 +144,7 @@ during a publish; Caddy is documented first.
 
 Also deferred until something needs it: a WordPress filter that lets a site add its own starting addresses.
 
-## Known gaps, as of 24 November 2026
+## Known gaps, as of 26 November 2026
 
 Check each is still true before relying on it or fixing it.
 
@@ -166,8 +166,22 @@ Check each is still true before relying on it or fixing it.
 - Tried with Docker Desktop only. One SEO plugin measured (`tests/compat-seo.sh`; the README has the table).
 - `wp-content/` (uploads, themes, plugins) is committed unencrypted; only the database backup is encrypted.
 - `offprint backup restore` replaces the database and nothing else: it does not rewrite addresses inside content (it
-  prints the command to consider), and `wp-content/` comes back from git, not from it. It has been run with the real
-  tools only on a throwaway site (`tests/restore-real.sh`), never yet on a real one.
+  prints the command to consider), and `wp-content/` comes back from git, not from it. Its `--from` a readable dump
+  has been run on a real site (26 November 2026, bringing an existing WordPress's database in); restoring from the
+  committed, encrypted backup has been run only on a throwaway site (`tests/restore-real.sh`).
+- Run for real on 26 November 2026, on two sites of the owner's: a publish with the encrypted backup, `offprint backup
+  verify` at a terminal, and a whole move of an existing site onto the tool (a site's own adapter for a
+  push-then-workflow deploy, `host-setup`, `setup-wp`, the restore, a publish to "Live", and a publish started by the
+  agent). What that showed, none of it fixed yet:
+  - A publish's warnings go to `var/status.json` and the admin bar, not to the terminal: a one-time warning (earlier
+    commits holding a readable dump) is easy to miss.
+  - `offprint setup-wp` deletes the Sample Page, which asks for a publish: a site that has never published shows
+    "Publish requested" until an agent is installed, and the agent then publishes at once.
+  - A fresh WordPress puts the Akismet and Hello Dolly plugins in `wp-content/plugins/`, and the first publish commits
+    them. The owner has to delete them (`offprint wp plugin delete akismet hello`).
+  - `offprint setup-wp` prints a PHP warning (`Undefined array key "HTTP_HOST"`) before it installs WordPress.
+  - A publish in which only the database changed still commits a whole new encrypted backup, which git cannot store
+    as a difference: a site's repository grows by the backup's size each time.
 - The backup can only be sent to the site's own repository (`backup.to` is `repo`). `bin/publish` makes it in one
   step and sends it in another, so that a second place is an addition.
 - There is no release tag yet.

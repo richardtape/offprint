@@ -3,7 +3,8 @@
 # tests/backup.test.sh): each copies it to the front of the PATH as `age`. tests/backup-real.sh runs the real tool the
 # same two ways, so keep this true to what that shows. STUB_DIR is the case's folder of notes and switches.
 #
-#   age -r RECIPIENT [-r RECIPIENT] -o OUT IN    "encrypts": OUT is the age header line, a line naming the recipients,
+#   age -r RECIPIENT [-r RECIPIENT] -o OUT [IN]  "encrypts" IN, or with no IN its standard input (the real tool does
+#                                                both): OUT is the age header line, a line naming the recipients,
 #                                                a line that differs on every run (the real tool's output does), then
 #                                                IN's bytes. Its arguments are noted in STUB_DIR/age.calls.
 #       age_fails: exits 1 and writes nothing.   age_empty: exits 0, OUT empty.   age_junk: exits 0, OUT is "junk".
@@ -35,7 +36,9 @@ while [ $# -gt 0 ]; do
     *) in="$1"; shift ;;
   esac
 done
-[ -n "$recipients" ] && [ -n "$out" ] && [ -f "$in" ] || { echo "the stand-in age: unexpected call" >&2; exit 99; }
+[ -n "$recipients" ] && [ -n "$out" ] || { echo "the stand-in age: unexpected call" >&2; exit 99; }
+if [ -z "$in" ]; then in="$out.stdin"; cat > "$in"; trap 'rm -f "$in"' EXIT; fi
+[ -f "$in" ] || { echo "the stand-in age: unexpected call" >&2; exit 99; }
 [ ! -f "$STUB_DIR/age_fails" ] || { echo "age: error: a failure the test asked for" >&2; exit 1; }
 [ ! -f "$STUB_DIR/age_empty" ] || { : > "$out"; exit 0; }
 [ ! -f "$STUB_DIR/age_junk" ] || { echo junk > "$out"; exit 0; }

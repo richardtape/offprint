@@ -26,6 +26,9 @@ usage: offprint COMMAND [ARGS...]
                                              and its adapter's file names and limits)
   offprint backup verify                     check that the committed database backup opens with your key (asks
                                              for the key; it is never stored) and is a whole dump
+  offprint backup restore [--from FILE] [--unchecked] [--yes]
+                                             replace the local database with the committed backup's (or a dump
+                                             file's), keeping an encrypted copy of the one it replaces
   offprint adapter setup [--yes]             set up on this Mac what the site's host adapter needs (each step says
                                              what it will do, and asks first; --yes: yes to each)
   offprint adapter doctor                    check what the site's host adapter needs, and the live site: one ok or

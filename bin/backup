@@ -1,80 +1,328 @@
 #!/bin/bash
-# The database backup's own command:  offprint backup verify
-# Checks that the backup in the site's last commit (backup/db.sql.age, which a publish encrypts to the public keys in
-# site.json) opens with the owner's private key and is a whole database dump: the way to find out that a backup is no
-# use before the day it is needed. Run from inside the site folder (or with OFFPRINT_SITE set to it).
+# The database backup's own commands:
+#   offprint backup verify
+#   offprint backup restore [--from FILE] [--unchecked] [--yes]
+# Run from inside the site folder (or with OFFPRINT_SITE set to it).
+#
+# verify checks that the backup in the site's last commit (backup/db.sql.age, which a publish encrypts to the public
+# keys in site.json) opens with the owner's private key and is a whole database dump: the way to find out that a backup
+# is no use before the day it is needed. It changes nothing.
+#
+# restore replaces the whole database of the site's local WordPress: with that committed backup's, or with the dump
+# in FILE (--from: an age file is opened with the key; any other file is taken as a readable dump, which is how a
+# database comes in from another WordPress). It is a command only: nothing WordPress can write starts one. In order:
+#   - the source is read through once, and must be a whole dump, before anything changes (--unchecked: a readable
+#     dump is taken without that check, for another tool's export that doesn't end as mariadb-dump's does);
+#   - it asks, at the terminal, for the site's name to be typed (--yes: no question; with no terminal, --yes is needed);
+#   - it holds the publish's lock (var/publish.lock), so it never runs beside a publish;
+#   - the database as it is now is dumped and encrypted, to site.json's recipients, as a new file in
+#     var/before-restore/ (never over an earlier one: restoring from a kept copy must not destroy it, and a second try
+#     after a failed import must not replace the real database's copy with a dump of an empty one; an empty database
+#     is not kept at all). If it can't be kept, nothing is replaced;
+#   - then the database is reset and the dump imported, on a pipe into WP-CLI in the site's container, and home and
+#     siteurl are set to the site's local address, as offprint setup-wp sets them (every WP-CLI call loading no plugin
+#     and no theme: the dump's own could stop it);
+#   - after a restore that worked, only the five newest kept copies stay.
+# No readable dump is ever written to disk here: SQL exists only on pipes.
 #
 # The private key is the owner's, kept off this Mac's disk (a password manager), and Offprint never stores it. It is
 # asked for here (not echoed), or read as one line from standard input when that isn't a terminal. It is held in one
 # shell variable, goes to age on a pipe from the shell's own printf, and is unset straight after: it never reaches a
 # file, a process's arguments, the environment of any process, a log or set -x output (tracing is turned off first
 # thing, as os/darwin/secret does, whether it came from bash -x or from an inherited SHELLOPTS; and the variable is
-# unset before it is used, so one of its name that the owner's shell had exported is not exported again with the key). What age decrypts is
-# streamed into the check of its last line and is never written anywhere, nor printed.
+# unset before it is used, so one of its name that the owner's shell had exported is not exported again with the key).
+# What age decrypts is streamed into a check of its last line, or into the import, and is never written anywhere, nor
+# printed. age's own messages are dropped: this says what happened in its own words, and nothing age prints can then
+# carry anything of the key's.
 #
-# Prints one line: "ok: ..." (exit 0) or "problem: ..." with what to do (exit 1). Exit 2: a usage mistake, or no site.
-# Changes nothing. Needs bash 3.2 (macOS) or newer.
+# Prints "ok: ..." (exit 0) or "problem: ..." with what to do (exit 1). Exit 2: a usage mistake, or no site.
+# Needs bash 3.2 (macOS) or newer.
 set -u
 # git finds the repository from the site folder, and only from there (as bin/publish, for the same reason: a GIT_DIR
 # inherited from a hook, say, would have every git call below look in another repository).
 unset GIT_DIR GIT_WORK_TREE GIT_IMPLICIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_PREFIX GIT_GRAFT_FILE GIT_SHALLOW_FILE
 # lib/site.sh first, found by the shell's own builtins: it makes the PATH safe to use before anything is looked up on
-# it, so the age and git run below are never ones WordPress put in the site folder.
+# it, so the age, git and docker run below are never ones WordPress put in the site folder.
 case "${BASH_SOURCE[0]}" in */*) here="${BASH_SOURCE[0]%/*}" ;; *) here=. ;; esac
 . "$here/../lib/site.sh" || exit 2
 set +x
 set +a   # (after set +x, so the one line a trace shows is still "+ set +x"): nothing set below is exported
 
-[ $# -eq 1 ] && [ "$1" = verify ] || { echo "usage: offprint backup verify" >&2; exit 2; }
+usage() { echo "usage: offprint backup verify | restore [--from FILE] [--unchecked] [--yes]" >&2; exit 2; }
+[ $# -ge 1 ] || usage
+cmd="$1"; shift
+from=""; have_from=0; unchecked=0; yes=0
+case "$cmd" in
+  verify) [ $# -eq 0 ] || usage ;;
+  restore)
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --from) [ $# -ge 2 ] && [ -n "$2" ] && [ "$have_from" = 0 ] || usage; from="$2"; have_from=1; shift 2 ;;
+        --unchecked) unchecked=1; shift ;;
+        --yes) yes=1; shift ;;
+        *) usage ;;
+      esac
+    done ;;
+  *) usage ;;
+esac
+START="$PWD"   # (a relative FILE is the caller's, not the site folder's)
 offprint_find_site
 offprint_load_site
 cd "$SITE" || exit 2
 
-problem() { printf 'problem: %s\n' "$1"; exit 1; }
 FILE=backup/db.sql.age
+LOCK="$SITE/var/publish.lock"; HAVE_LOCK=0; KEEP_TMP=""
+# The lock, when this run took it, and a kept copy not yet whole, go on every exit; so does the key.
+cleanup() {
+  key=""; unset key
+  [ -z "$KEEP_TMP" ] || rm -f "$KEEP_TMP"
+  [ "$HAVE_LOCK" != 1 ] || rm -rf "$LOCK"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+problem() { printf 'problem: %s\n' "$1"; exit 1; }
+# shown TEXT: TEXT with every control character as a ?, for a name the owner typed or a value out of a dump
+shown() { printf '%s' "$1" | LC_ALL=C tr '\001-\037\177' '?'; }
+whole='NF { last = $0 } END { exit last == "-- Dump completed" ? 0 : 1 }'
 
-# The backup looked at is the last commit's: what a publish pushed, and what a restore would start from. The file in
-# the folder is read only once it is known to be that same file (a plain file, never a link, whose git id is the
-# commit's), so what is verified is never something else that has taken its name.
-top="$(git rev-parse --show-toplevel 2>/dev/null < /dev/null)" || top=""
-head_blob=""
-if [ -n "$top" ] && [ "$top" -ef "$SITE" ]; then
-  head_blob="$(git rev-parse -q --verify "HEAD:$FILE" 2>/dev/null < /dev/null)" || head_blob=""
-fi
-[ -n "$head_blob" ] || problem "this site's last commit has no $FILE. Publish first."
-disk_blob=""
-if [ -f "$FILE" ] && [ ! -L "$FILE" ] && [ ! -L backup ]; then
-  disk_blob="$(git hash-object --no-filters -- "$FILE" 2>/dev/null < /dev/null)" || disk_blob=""
-fi
-[ "$disk_blob" = "$head_blob" ] \
-  || problem "$FILE in this folder is not the one in the last commit; publish, or restore it with git, then verify again."
-commit="$(git rev-parse --short HEAD 2>/dev/null < /dev/null)" || commit="?"
-
-command -v age > /dev/null 2>&1 || problem "age isn't installed; install it (brew install age) and verify again."
-
+# committed_source WORD: the backup in the last commit, as SRC, and its commit as COMMIT. What is looked at is what a
+# publish pushed. The file in the folder is read only once it is known to be that same file (a plain file, never a
+# link, whose git id is the commit's), so what is verified or restored is never something else that has taken its name.
+committed_source() {
+  local top head_blob="" disk_blob=""
+  top="$(git rev-parse --show-toplevel 2>/dev/null < /dev/null)" || top=""
+  if [ -n "$top" ] && [ "$top" -ef "$SITE" ]; then
+    head_blob="$(git rev-parse -q --verify "HEAD:$FILE" 2>/dev/null < /dev/null)" || head_blob=""
+  fi
+  if [ -z "$head_blob" ]; then
+    if [ "$1" = restore ]; then problem "this site's last commit has no $FILE. Publish first, or name a dump with --from."; fi
+    problem "this site's last commit has no $FILE. Publish first."
+  fi
+  if [ -f "$FILE" ] && [ ! -L "$FILE" ] && [ ! -L backup ]; then
+    disk_blob="$(git hash-object --no-filters -- "$FILE" 2>/dev/null < /dev/null)" || disk_blob=""
+  fi
+  [ "$disk_blob" = "$head_blob" ] \
+    || problem "$FILE in this folder is not the one in the last commit; publish, or restore it with git, then $1 again."
+  COMMIT="$(git rev-parse --short HEAD 2>/dev/null < /dev/null)" || COMMIT="?"
+  SRC="$SITE/$FILE"
+}
+need_age() { command -v age > /dev/null 2>&1 || problem "age isn't installed; install it (brew install age) and $1 again."; }
+# read_key: the private key into $key: asked for unseen at a terminal, else the first line of standard input.
 # (unset first: set +a stops new variables being exported, but one that arrived exported stays so, and what is read
 # into it would then be in the environment of age and awk)
-unset key rc
-key=""
-if [ -t 0 ]; then
-  printf "Paste the backup's private key (AGE-SECRET-KEY-…), then Return: " >&2
-  IFS= read -rs key || true
-  printf '\n' >&2
-else
-  IFS= read -r key || true
-fi
-[ -n "$key" ] || problem "no key was given."
+read_key() {
+  unset key rc
+  key=""
+  if [ -t 0 ]; then
+    printf "Paste the backup's private key (AGE-SECRET-KEY-…), then Return: " >&2
+    IFS= read -rs key || true
+    printf '\n' >&2
+  else
+    IFS= read -r key || true
+  fi
+  [ -n "$key" ] || problem "no key was given."
+}
+# stream: the source's readable SQL on standard output. age reads the key from its standard input (-i -) and the
+# backup from the file.
+stream() {
+  if [ "$ENCRYPTED" = 1 ]; then printf '%s\n' "$key" | age -d -i - "$SRC" 2> /dev/null; else cat -- "$SRC"; fi
+}
+# check_whole NAME WHAT_NOW: the encrypted source opens with the key and ends as a dump does (awk keeps only the last
+# line that isn't blank, as a publish does when it checks the dump it has just taken); else the problem, and out.
+check_whole() {
+  stream < /dev/null | LC_ALL=C awk "$whole" > /dev/null 2>&1
+  rc="${PIPESTATUS[0]} ${PIPESTATUS[1]}"
+  case "$rc" in
+    "0 0") return 0 ;;
+    "0 "*) problem "$1 opens, but what is in it is not a whole database dump (its last line is not \"-- Dump completed\"). $2" ;;
+    *) problem "that key doesn't open $1. $3" ;;
+  esac
+}
 
-# age reads the key from its standard input (-i -) and the backup from the file. Its own messages are dropped: this
-# says what happened in its own words, and nothing age prints can then carry anything of the key's. awk keeps only the
-# last line that isn't blank, as a publish does when it checks the dump it has just taken.
-printf '%s\n' "$key" | age -d -i - "$SITE/$FILE" 2> /dev/null \
-  | LC_ALL=C awk 'NF { last = $0 } END { exit last == "-- Dump completed" ? 0 : 1 }' > /dev/null 2>&1
-rc="${PIPESTATUS[1]} ${PIPESTATUS[2]}"
-key=""; unset key
-case "$rc" in
-  "0 0") printf 'ok: %s (commit %s) opens with this key and is a whole database dump.\n' "$FILE" "$commit"; exit 0 ;;
-  "0 "*) problem "$FILE opens, but what is in it is not a whole database dump (its last line is not \"-- Dump completed\"). Publish again, and verify again." ;;
-  *) problem "that key doesn't open $FILE. Nothing was changed." ;;
+if [ "$cmd" = verify ]; then
+  committed_source verify
+  need_age verify
+  ENCRYPTED=1
+  read_key
+  check_whole "$FILE" "Publish again, and verify again." "Nothing was changed."
+  key=""; unset key
+  printf 'ok: %s (commit %s) opens with this key and is a whole database dump.\n' "$FILE" "$COMMIT"
+  exit 0
+fi
+
+# ---- restore ------------------------------------------------------------------------------------------------------
+# The compose project named in site.json must be this site folder's own (lib/site.sh), before anything is asked of it:
+# otherwise this would replace the database of whatever project has that name.
+offprint_require_project
+# The database it replaces is kept, encrypted to site.json's recipients: so there must be some, and age.
+[ -n "$SITE_BACKUP_RECIPIENTS" ] \
+  || problem 'site.json has no "backup" block, and a restore keeps an encrypted copy of the database it replaces. Add one (the README has the steps), then restore again.'
+need_age restore
+
+# The source. A file the owner names must be a plain file (never a link: where it leads could change between the
+# check and the read), and not in a folder WordPress can write (wp-content/) or one the tool keeps for itself (var/):
+# what is imported must be the owner's own choice of file, not something that took its place. The one exception is a
+# kept copy, by its exact name, directly in var/before-restore/. Folders are compared as they are on disk (-ef), so
+# another spelling of the path, or a link that leads in, is the same folder.
+if [ "$have_from" = 0 ]; then
+  committed_source restore
+  NAME="$FILE (commit $COMMIT)"; SHORT="$FILE"
+else
+  NAME="$(shown "$from")"; SHORT="$NAME"
+  case "$from" in /*) f="$from" ;; *) f="$START/$from" ;; esac
+  [ -f "$f" ] && [ ! -L "$f" ] || problem "$NAME isn't a plain file."
+  fdir="$(CDPATH= cd -P -- "${f%/*}" 2> /dev/null && pwd -P)" || problem "$NAME isn't a plain file."
+  SRC="$fdir/${f##*/}"
+  [ -f "$SRC" ] && [ ! -L "$SRC" ] || problem "$NAME isn't a plain file."
+  kept_copy=0
+  if [ "$fdir" -ef "$SITE/var/before-restore" ] && [ ! -L "$SITE/var/before-restore" ]; then
+    case "${f##*/}" in
+      [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].sql.age) kept_copy=1 ;;
+    esac
+  fi
+  if [ "$kept_copy" = 0 ]; then
+    d="$fdir"
+    while [ -n "$d" ] && [ "$d" != / ]; do
+      if [ "$d" -ef "$SITE/wp-content" ] || [ "$d" -ef "$SITE/var" ]; then
+        problem "$NAME is in a folder WordPress can write or the tool keeps for itself; copy it somewhere else first."
+      fi
+      d="${d%/*}"
+    done
+  fi
+fi
+ENCRYPTED=0
+if head -c 21 -- "$SRC" 2> /dev/null | LC_ALL=C grep -q '^age-encryption\.org/v1$'; then ENCRYPTED=1; fi
+[ "$ENCRYPTED" = 0 ] || [ "$unchecked" = 0 ] || usage
+
+running="$(dc ps --status running --services 2> /dev/null < /dev/null)" || running=""
+case "
+$running
+" in
+  *"
+wordpress
+"*) ;;
+  *) running="" ;;
 esac
+case "
+$running
+" in
+  *"
+db
+"*) ;;
+  *) problem "WordPress isn't running (offprint compose up -d), so nothing was restored." ;;
+esac
+
+# A publish WordPress asks for during the restore waits for the lock, then runs on the restored database. For the
+# site's own backup that is right; for a dump from another address it would come before any search-replace. So the
+# owner is told, before and after, when this site's agent is installed.
+AGENT=""
+if [ -n "${HOME:-}" ] && [ -e "$HOME/Library/LaunchAgents/$SITE_AGENT_LABEL.plist" ]; then
+  AGENT="The publish agent is installed: a publish WordPress asks for will run straight after, on the restored database. offprint install-agent --remove takes it away."
+fi
+if [ "$yes" = 1 ]; then
+  [ -z "$AGENT" ] || printf '%s\n' "$AGENT" >&2
+else
+  [ -t 0 ] || problem "a restore asks before it replaces the database, and there is no terminal to ask at; say --yes."
+  {
+    printf 'This replaces the whole database of %s (https://%s) with %s.\n' "$SITE_NAME" "$SITE_LOCAL_HOST" "$NAME"
+    printf 'Its users and passwords become the dump'"'"'s. The database as it is now is kept, encrypted, in var/before-restore/.\n'
+    [ -z "$AGENT" ] || printf '%s\n' "$AGENT"
+    printf "Type the site's name (%s) to go on: " "$SITE_NAME"
+  } >&2
+  answer=""; IFS= read -r answer || true
+  [ "$answer" = "$SITE_NAME" ] || problem "that isn't the site's name; nothing was restored."
+fi
+[ "$ENCRYPTED" = 0 ] || read_key
+
+# The lock a publish takes (mkdir is atomic), with the same two notes in it, so a publish started meanwhile sees a
+# lock that is held. One that is there already is never taken over here: a publish is running, or left it.
+mkdir -p "$SITE/var" 2> /dev/null
+mkdir "$LOCK" 2> /dev/null \
+  || problem "a publish is running, or left its lock (var/publish.lock); wait for it, then restore again."
+HAVE_LOCK=1
+echo "$$" > "$LOCK/pid"; ps -o command= -p "$$" > "$LOCK/command" 2> /dev/null
+
+# Whole first: nothing below runs for a source that doesn't open, or isn't a dump to its end.
+note=""
+if [ "$ENCRYPTED" = 1 ]; then
+  check_whole "$SHORT" "Nothing was restored." "Nothing was restored."
+elif [ "$unchecked" = 1 ]; then
+  note=" (not checked to be a whole dump: --unchecked)"
+else
+  LC_ALL=C awk 'NF { last = $0 } END { exit index(last, "-- Dump completed") == 1 ? 0 : 1 }' < "$SRC" > /dev/null 2>&1 \
+    || problem "$NAME doesn't end as a database dump does (\"-- Dump completed\"). If it is a whole export from another tool, say --unchecked. Nothing was restored."
+fi
+
+# wpq ARGS...: WP-CLI in the site's container, loading no plugin and no theme, with nothing on its standard input
+wpq() { /bin/bash "$TOOL/bin/wp" "$@" --skip-plugins --skip-themes < /dev/null; }
+
+# Keep what is there. (SHOW TABLES, not "wp db tables": that one needs WordPress installed, which an empty database
+# isn't.) The dump goes from mariadb-dump through the same last-line check to age, on pipes; the copy is taken only
+# when all three succeeded and what age wrote is an age file, and then gets its name, which no earlier copy has.
+KEEP_DIR="$SITE/var/before-restore"; kept=""
+cant_keep() { problem "the database as it is now couldn't be kept, so nothing was replaced."; }
+tables="$(wpq db query 'SHOW TABLES' --skip-column-names 2> /dev/null)" || cant_keep
+if [ -n "$tables" ]; then
+  [ ! -L "$KEEP_DIR" ] || cant_keep
+  mkdir -p "$KEEP_DIR" 2> /dev/null && chmod 700 "$KEEP_DIR" 2> /dev/null || cant_keep
+  stamp="$(date -u +%Y%m%d-%H%M%S)"
+  while [ -e "$KEEP_DIR/$stamp.sql.age" ] || [ -L "$KEEP_DIR/$stamp.sql.age" ]; do sleep 1; stamp="$(date -u +%Y%m%d-%H%M%S)"; done
+  KEEP_TMP="$KEEP_DIR/$stamp.sql.age.tmp"
+  rm -f "$KEEP_TMP"
+  set --
+  for r in $SITE_BACKUP_RECIPIENTS; do set -- "$@" -r "$r"; done
+  dc exec -T db sh -c 'exec mariadb-dump --skip-dump-date --skip-extended-insert --single-transaction -u"$MARIADB_USER" -p"$MARIADB_PASSWORD" "$MARIADB_DATABASE"' 2> /dev/null < /dev/null \
+    | LC_ALL=C awk '{ print } NF { last = $0 } END { exit last == "-- Dump completed" ? 0 : 1 }' 2> /dev/null \
+    | age "$@" -o "$KEEP_TMP" > /dev/null 2>&1
+  rc="${PIPESTATUS[0]} ${PIPESTATUS[1]} ${PIPESTATUS[2]}"
+  if [ "$rc" != "0 0 0" ] || [ ! -s "$KEEP_TMP" ] || [ -L "$KEEP_TMP" ] \
+    || ! head -c 21 -- "$KEEP_TMP" 2> /dev/null | LC_ALL=C grep -q '^age-encryption\.org/v1$'; then
+    cant_keep
+  fi
+  mv "$KEEP_TMP" "$KEEP_DIR/$stamp.sql.age" 2> /dev/null || cant_keep
+  KEEP_TMP=""; kept="var/before-restore/$stamp.sql.age"
+fi
+if [ -n "$kept" ]; then back="Put the last one back with: offprint backup restore --from $kept"
+else back="The database was empty before, so there is nothing to put back."; fi
+
+# Replace. From here the database is empty or part-filled until the import ends.
+import_failed() { problem "the import failed, and the database is now empty or part-filled. $back"; }
+wpq db reset --yes > /dev/null 2>&1 || import_failed
+stream < /dev/null | /bin/bash "$TOOL/bin/wp" db import - --skip-plugins --skip-themes > /dev/null 2>&1
+rc="${PIPESTATUS[0]} ${PIPESTATUS[1]}"
+key=""; unset key
+[ "$rc" = "0 0" ] || import_failed
+
+# Reachable: the site's local address, as offprint setup-wp sets it. The address the dump had is kept for the note.
+if [ -n "$kept" ]; then last="Put the last database back with: offprint backup restore --from $kept"
+else last="The database was empty before, so there is nothing to put back."; fi
+unreadable() { problem "the dump is in, but WordPress can't read its settings (another table prefix?). $last"; }
+old_home="$(wpq option get home 2> /dev/null)" || unreadable
+wpq option update home "https://$SITE_LOCAL_HOST" > /dev/null 2>&1 || unreadable
+wpq option update siteurl "https://$SITE_LOCAL_HOST" > /dev/null 2>&1 || unreadable
+
+# Only now, the restore having worked, do older kept copies go: the five newest stay (their names sort by time).
+if [ -d "$KEEP_DIR" ] && [ ! -L "$KEEP_DIR" ]; then
+  count=0
+  for f in "$KEEP_DIR"/[0-9]*.sql.age; do [ -f "$f" ] && count=$((count + 1)); done
+  for f in "$KEEP_DIR"/[0-9]*.sql.age; do
+    [ "$count" -gt 5 ] || break
+    [ -f "$f" ] || continue
+    rm -f "$f"; count=$((count - 1))
+  done
+fi
+
+if [ -n "$kept" ]; then printf "ok: %s's database is now %s's%s. The one before is %s.\n" "$SITE_NAME" "$NAME" "$note" "$kept"
+else printf "ok: %s's database is now %s's%s. The database was empty before, so nothing was kept.\n" "$SITE_NAME" "$NAME" "$note"; fi
+# What the dump called home is the dump's text: printed only when it is plainly an address, and never run.
+if [ -n "$old_home" ] && [ "$old_home" != "https://$SITE_LOCAL_HOST" ]; then
+  if printf '%s' "$old_home" | LC_ALL=C grep -Eq '^https?://[A-Za-z0-9.:-]+$' && [ "$(printf '%s' "$old_home" | wc -l | tr -d ' ')" = 0 ]; then
+    printf "The dump came from %s: addresses inside its content still say so. To change them: offprint wp search-replace '%s' 'https://%s' --skip-columns=guid\n" "$old_home" "$old_home" "$SITE_LOCAL_HOST"
+  else
+    printf 'The dump came from another address: addresses inside its content still say so (offprint wp search-replace changes them).\n'
+  fi
+fi
+[ -z "$AGENT" ] || printf '%s\n' "$AGENT"
+exit 0

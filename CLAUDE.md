@@ -107,7 +107,7 @@ bash tests/hosts-block.test.sh              # 4
 bash tests/host.test.sh                     # 780
 bash tests/config.test.sh                   # 275
 bash tests/names.test.sh                    # 9
-bash tests/backup.test.sh                   # 59
+bash tests/backup.test.sh                   # 256
 bash tests/e2e.sh                           # 275; needs Docker; not in CI
 bash tests/compat-seo.sh wordpress-seo      # 6; needs Docker and the network; not in CI; never beside e2e.sh
 bash tests/backup-real.sh                   # 15; needs the real age (brew install age); not in CI

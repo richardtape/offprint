@@ -24,6 +24,8 @@ usage: offprint COMMAND [ARGS...]
   offprint host-undo [--print]               take this site's host set-up away again, and nothing else
   offprint check DIR                         run the export checks on DIR, as a publish runs them (the site's hosts,
                                              and its adapter's file names and limits)
+  offprint backup verify                     check that the committed database backup opens with your key (asks
+                                             for the key; it is never stored) and is a whole dump
   offprint adapter setup [--yes]             set up on this Mac what the site's host adapter needs (each step says
                                              what it will do, and asks first; --yes: yes to each)
   offprint adapter doctor                    check what the site's host adapter needs, and the live site: one ok or
@@ -61,6 +63,7 @@ case "$cmd" in
   help | -h | --help) usage; exit 0 ;;
   new) exec /bin/bash "$BIN/new" "$@" ;;
   publish) exec /bin/bash "$BIN/publish" "$@" ;;
+  backup) exec /bin/bash "$BIN/backup" "$@" ;;
   agent) exec /bin/bash "$BIN/publish-agent" "$@" ;;
   wp) exec /bin/bash "$BIN/wp" "$@" ;;
   setup-wp) exec /bin/bash "$BIN/setup-wp" "$@" ;;

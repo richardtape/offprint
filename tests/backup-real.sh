@@ -38,5 +38,27 @@ age -r "$recipient" -r "$recipient2" -o "$tmp/again.age" "$tmp/db.sql"
 check "encrypting the same file twice gives different bytes" no "$(cmp -s "$tmp/db.sql.age" "$tmp/again.age" && echo yes || echo no)"
 check "no private key reached a file" "" "$(grep -rl 'AGE-SECRET-KEY-' "$tmp")"
 
+
+# offprint backup verify, on a throwaway site folder whose backup the real age made, to the site.json's own recipients
+site="$tmp/site"; mkdir -p "$site/backup"
+sed "s/\"recipients\": \[[^]]*\]/\"recipients\": [\"$recipient\", \"$recipient2\"]/" tests/fixtures/site.json > "$site/site.json"
+cp "$tmp/db.sql.age" "$site/backup/db.sql.age"
+git init -q -b main "$site"; git -C "$site" config user.email t@example.com; git -C "$site" config user.name Test
+git -C "$site" add -A; git -C "$site" commit -q -m initial
+verify() { printf '%s\n' "$1" | env -u GIT_DIR OFFPRINT_SITE="$site" /bin/bash bin/offprint backup verify 2>&1; }
+out="$(verify "$identity")"; code=$?
+check "offprint backup verify, the first key: exits 0" 0 "$code"
+check "offprint backup verify, the first key: says ok" "ok: backup/db.sql.age (commit $(git -C "$site" rev-parse --short HEAD)) opens with this key and is a whole database dump." "$out"
+out="$(verify "$identity2")"; check "offprint backup verify, the second key: exits 0" 0 "$?"
+out="$(verify "$stranger")"; code=$?
+check "offprint backup verify, a key that is no recipient: exits 1" 1 "$code"
+check "offprint backup verify, a key that is no recipient: says so" "problem: that key doesn't open backup/db.sql.age. Nothing was changed." "$out"
+printf -- '-- a dump\nINSERT INTO t VALUES (1);\n' > "$tmp/cut.sql"; age -r "$recipient" -o "$site/backup/db.sql.age" "$tmp/cut.sql" 2> /dev/null || { rm -f "$site/backup/db.sql.age"; age -r "$recipient" -o "$site/backup/db.sql.age" "$tmp/cut.sql"; }
+git -C "$site" commit -q -am cut
+out="$(verify "$identity")"; code=$?
+check "offprint backup verify, a dump cut short: exits 1" 1 "$code"
+case "$out" in *"is not a whole database dump"*) ok "offprint backup verify, a dump cut short: says so" ;; *) bad "offprint backup verify, a dump cut short: says so (got '$out')" ;; esac
+check "no private key reached a file, after the verifies" "" "$(grep -rl 'AGE-SECRET-KEY-' "$tmp")"
+
 echo "passed $passed"
 exit "$fail"

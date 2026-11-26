@@ -67,6 +67,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: bash tests/check-site.test.sh
 
+      - name: offprint backup verify tests
+        if: ${{ !cancelled() }}
+        run: bash tests/backup.test.sh
+
       - name: offprint new tests
         if: ${{ !cancelled() }}
         run: bash tests/new.test.sh

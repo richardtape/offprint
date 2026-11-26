@@ -1,0 +1,76 @@
+#!/bin/bash
+# The database backup's own command:  offprint backup verify
+# Checks that the backup in the site's last commit (backup/db.sql.age, which a publish encrypts to the public keys in
+# site.json) opens with the owner's private key and is a whole database dump: the way to find out that a backup is no
+# use before the day it is needed. Run from inside the site folder (or with OFFPRINT_SITE set to it).
+#
+# The private key is the owner's, kept off this Mac's disk (a password manager), and Offprint never stores it. It is
+# asked for here (not echoed), or read as one line from standard input when that isn't a terminal. It is held in one
+# shell variable, goes to age on a pipe from the shell's own printf, and is unset straight after: it never reaches a
+# file, a process's arguments, the environment of any process, a log or set -x output (tracing is turned off first
+# thing, as os/darwin/secret does, whether it came from bash -x or from an inherited SHELLOPTS). What age decrypts is
+# streamed into the check of its last line and is never written anywhere, nor printed.
+#
+# Prints one line: "ok: ..." (exit 0) or "problem: ..." with what to do (exit 1). Exit 2: a usage mistake, or no site.
+# Changes nothing. Needs bash 3.2 (macOS) or newer.
+set -u
+# git finds the repository from the site folder, and only from there (as bin/publish, for the same reason: a GIT_DIR
+# inherited from a hook, say, would have every git call below look in another repository).
+unset GIT_DIR GIT_WORK_TREE GIT_IMPLICIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_PREFIX GIT_GRAFT_FILE GIT_SHALLOW_FILE
+# lib/site.sh first, found by the shell's own builtins: it makes the PATH safe to use before anything is looked up on
+# it, so the age and git run below are never ones WordPress put in the site folder.
+case "${BASH_SOURCE[0]}" in */*) here="${BASH_SOURCE[0]%/*}" ;; *) here=. ;; esac
+. "$here/../lib/site.sh" || exit 2
+set +x
+set +a   # (after set +x, so the one line a trace shows is still "+ set +x"): nothing set below is exported
+
+[ $# -eq 1 ] && [ "$1" = verify ] || { echo "usage: offprint backup verify" >&2; exit 2; }
+offprint_find_site
+offprint_load_site
+cd "$SITE" || exit 2
+
+problem() { printf 'problem: %s\n' "$1"; exit 1; }
+FILE=backup/db.sql.age
+
+# The backup looked at is the last commit's: what a publish pushed, and what a restore would start from. The file in
+# the folder is read only once it is known to be that same file (a plain file, never a link, whose git id is the
+# commit's), so what is verified is never something else that has taken its name.
+top="$(git rev-parse --show-toplevel 2>/dev/null < /dev/null)" || top=""
+head_blob=""
+if [ -n "$top" ] && [ "$top" -ef "$SITE" ]; then
+  head_blob="$(git rev-parse -q --verify "HEAD:$FILE" 2>/dev/null < /dev/null)" || head_blob=""
+fi
+[ -n "$head_blob" ] || problem "this site's last commit has no $FILE. Publish first."
+disk_blob=""
+if [ -f "$FILE" ] && [ ! -L "$FILE" ] && [ ! -L backup ]; then
+  disk_blob="$(git hash-object --no-filters -- "$FILE" 2>/dev/null < /dev/null)" || disk_blob=""
+fi
+[ "$disk_blob" = "$head_blob" ] \
+  || problem "$FILE in this folder is not the one in the last commit; publish, or restore it with git, then verify again."
+commit="$(git rev-parse --short HEAD 2>/dev/null < /dev/null)" || commit="?"
+
+command -v age > /dev/null 2>&1 || problem "age isn't installed; install it (brew install age) and verify again."
+
+key=""
+if [ -t 0 ]; then
+  printf "Paste the backup's private key (AGE-SECRET-KEY-…), then Return: " >&2
+  IFS= read -rs key || true
+  printf '\n' >&2
+else
+  IFS= read -r key || true
+fi
+[ -n "$key" ] || problem "no key was given."
+
+# age reads the key from its standard input (-i -) and the backup from the file. Its own messages are dropped: this
+# says what happened in its own words, and nothing age prints can then carry anything of the key's. awk keeps only the
+# last line that isn't blank, as a publish does when it checks the dump it has just taken.
+printf '%s\n' "$key" | age -d -i - "$SITE/$FILE" 2> /dev/null \
+  | LC_ALL=C awk 'NF { last = $0 } END { exit last == "-- Dump completed" ? 0 : 1 }' > /dev/null 2>&1
+rc="${PIPESTATUS[1]} ${PIPESTATUS[2]}"
+key=""; unset key
+case "$rc" in
+  "0 0") printf 'ok: %s (commit %s) opens with this key and is a whole database dump.\n' "$FILE" "$commit"; exit 0 ;;
+  "0 "*) problem "$FILE opens, but what is in it is not a whole database dump (its last line is not \"-- Dump completed\"). Publish again, and verify again." ;;
+  *) problem "that key doesn't open $FILE. Nothing was changed." ;;
+esac

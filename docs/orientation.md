@@ -165,8 +165,9 @@ Check each is still true before relying on it or fixing it.
   by the agent while the login Keychain is locked.
 - Tried with Docker Desktop only. One SEO plugin measured (`tests/compat-seo.sh`; the README has the table).
 - `wp-content/` (uploads, themes, plugins) is committed unencrypted; only the database backup is encrypted.
-- There is no restore command: the README gives the two commands to run by hand, and they have not been tested as a
-  command would be. `offprint backup verify` proves the backup opens and is whole, not that it imports.
+- `offprint backup restore` replaces the database and nothing else: it does not rewrite addresses inside content (it
+  prints the command to consider), and `wp-content/` comes back from git, not from it. It has been run with the real
+  tools only on a throwaway site (`tests/restore-real.sh`), never yet on a real one.
 - The backup can only be sent to the site's own repository (`backup.to` is `repo`). `bin/publish` makes it in one
   step and sends it in another, so that a second place is an addition.
 - There is no release tag yet.

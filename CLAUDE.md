@@ -15,7 +15,9 @@ bin/new                       makes a new site folder outside every site and rep
 bin/publish                   export, check, back up (the database dump, encrypted with age to site.json's backup
                               recipients, as backup/db.sql.age), commit, push, then the adapter's deploy, and wait for
                               the live site
-bin/backup                    offprint backup verify: the committed backup opens with the owner's key, and is a whole dump
+bin/backup                    offprint backup verify (the committed backup opens with the owner's key, and is a whole
+                              dump) and restore (the local database replaced from it or from a dump file, the one
+                              before kept encrypted in var/before-restore/)
 bin/publish-agent             what launchd runs when WordPress asks for a publish; takes var/inbox/publish-request
 bin/check-site                the export checks; bin/check-site-addresses.php does the link, image, form and feed checks
 bin/setup-wp                  makes a site's local WordPress (certificate, containers, install, options); on a WordPress it
@@ -88,8 +90,8 @@ tests/                        every suite (tests/php, tests/fixtures, *.test.sh,
 - Tests first. Test counts must never fall. Plain examples only: `example.com`, `mysite.local`, `127.0.0.9`, the Worker
   `my-site`, the account id `0123456789abcdef0123456789abcdef`.
 - Built: the adapters `none` and `cloudflare-workers` (`offprint adapter setup` and `doctor` set it up and check it);
-  `offprint new` (a site folder only: it runs no set-up); the encrypted database backup and `offprint backup verify`.
-  Not built: a restore command; any place to send the backup but the site's repository; the `ssh` adapter; a
+  `offprint new` (a site folder only: it runs no set-up); the encrypted database backup, `offprint backup verify` and
+  `offprint backup restore`. Not built: any place to send the backup but the site's repository; the `ssh` adapter; a
   top-level `setup`, `doctor` or `upgrade`. Do not describe those as if they were.
 
 ## Tests
@@ -111,13 +113,14 @@ bash tests/backup.test.sh                   # 256
 bash tests/e2e.sh                           # 275; needs Docker; not in CI
 bash tests/compat-seo.sh wordpress-seo      # 6; needs Docker and the network; not in CI; never beside e2e.sh
 bash tests/backup-real.sh                   # 15; needs the real age (brew install age); not in CI
+bash tests/restore-real.sh                  # 27; needs Docker, mkcert and the real age; not in CI
 bash tests/site.test.sh SITE_DIR            # needs a real, running site; not in CI
 ```
 
 The shell suites print one `ok` or `FAIL` line per case; the counts above are the `ok` lines on macOS. On Linux (CI)
 they differ: `check-site`, `publish`, `adapter`, `agent` and `host` print fewer, since the cases that need the Mac
 (`plutil`, or a disk that takes two letter cases for one name) are skipped there, with a `skip` line; `config` prints
-more, since some of its cases run again under a second bash. All but the last four are hermetic and run in CI.
+more, since some of its cases run again under a second bash. All but the last five are hermetic and run in CI.
 `tests/adapter.test.sh` (the adapter contract, both adapters, `offprint adapter setup` and `doctor`) and
 `tests/secret.test.sh` (`os/darwin/secret`) are the adapters' suites; `tests/new.test.sh` is `offprint new`'s (its
 setup-wp half, the Sample Page and the plugin commit, is in `tests/publish.test.sh`, with setup-wp's other cases). CI
@@ -149,5 +152,9 @@ the `plutil` and `install-agent` cases) are never run in CI. So run `check-site`
 - No test runs the real `age` but `tests/backup-real.sh`, which makes its keys in shell variables only and touches no
   site. Every other suite that reaches a publish or `offprint backup verify` has `tests/fixtures/age-standin` first on
   the `PATH`. Run `tests/backup-real.sh` on the Mac before merging any change to the backup.
+- `offprint backup restore` replaces a WordPress's whole database. Run it only against a stand-in `docker`
+  (`tests/backup.test.sh`), or against the throwaway site `tests/restore-real.sh` makes (compose project
+  `offprint-restore-real`, in a temporary folder, removed on exit; it refuses to start while that project exists).
+  Never run it for a real site outside a step the owner attends.
 - A push runs CI, on any branch. Wait for it to go green (`gh run watch`).
 - The repo is public. `main` is never rewritten or force-pushed: its commits must stay reachable.

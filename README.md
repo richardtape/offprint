@@ -341,15 +341,43 @@ as it is (age's output differs every time, so encrypting again would make a comm
 takes the readable `backup/db.sql` out of the commit and the folder, and warns once that earlier commits still hold
 it: a publish never rewrites history, so whether to remove it from the repository's past is yours to decide.
 
-**Restoring** is by hand; there is no command for it yet. In the site folder, with its WordPress running:
+**Restoring.** In the site folder, with its WordPress running, `offprint backup restore` replaces the local
+WordPress's whole database with the backup in the last commit. Its users and passwords become the backup's.
 
-```
-age -d -i - backup/db.sql.age | offprint wp db import -
-```
+1. It reads the backup through once, and goes no further unless it opens with your key and is a whole dump.
+2. It asks you to type the site's name (`--yes` skips the question), then for the private key, which is not shown.
+3. The database as it is now is dumped and kept, encrypted to the keys in `site.json`, as a new file in
+   `var/before-restore/`. If that can't be done, nothing is replaced.
+4. The database is replaced, and WordPress's own address is set to the site's local one.
 
-`age` waits for the private key: paste it, press Return, then Ctrl-D (it reads until the end of its input). Unlike
-`offprint backup verify`, `age` shows the key as you paste it, so clear the terminal's scrollback afterwards. This
-replaces the local WordPress's whole database with the backup's. It has not been made a command or tested as one.
+It ends with one `ok:` line, or one `problem:` line saying what to do. If the import itself fails, the database is
+left empty, and the line gives the exact command that puts the last one back:
+`offprint backup restore --from var/before-restore/DATE-TIME.sql.age`. Each restore keeps a new copy and never writes
+over an earlier one; after a restore that worked, the five newest stay. A restore never runs beside a publish. If the
+site's publish agent is installed, a publish that WordPress asks for runs straight after one, on the restored
+database, and the command says so.
+
+On a new Mac: clone the site's repository, run `offprint host-setup` and `offprint setup-wp` (which makes an empty
+WordPress), then `offprint backup restore`. To restore an earlier commit's backup, write it to a file outside the site
+folder first (`git show COMMIT:backup/db.sql.age > FILE`) and name it with `--from FILE`.
+
+### Bringing an existing WordPress's database into a site
+
+`offprint backup restore --from FILE` takes a dump file in place of the site's own backup: a readable `.sql` dump, or
+an age file encrypted to your key. That is how the database of a WordPress that lived somewhere else comes into a new
+Offprint site:
+
+1. Make the site as in [Try it](#try-it), up to `offprint setup-wp`, and give it its backup key.
+2. Export the other WordPress's database to a file (`mariadb-dump`, `mysqldump`, `wp db export`, or its host's export),
+   and keep that file outside the site folder's `wp-content/` and `var/`.
+3. `offprint backup restore --from FILE`. A dump must end as `mariadb-dump`'s and `mysqldump`'s do
+   (`-- Dump completed`); for a whole export from a tool that ends another way, add `--unchecked`.
+4. It sets WordPress's own address to the site's local one, and when the dump came from another address it says so
+   and prints the command that changes the addresses inside posts:
+   `offprint wp search-replace 'OLD' 'https://LOCAL' --skip-columns=guid`. It does not run it: look first.
+5. Copy the other WordPress's uploads, themes and plugins into `wp-content/` yourself; a restore replaces the
+   database only. A dump whose tables have another prefix than `wp_` is imported but can't be read; the command
+   says so, with the way back.
 
 `wp-content/` (uploads, themes, plugins) is committed as it is, not encrypted.
 
@@ -377,6 +405,9 @@ usage: offprint COMMAND [ARGS...]
                                              and its adapter's file names and limits)
   offprint backup verify                     check that the committed database backup opens with your key (asks
                                              for the key; it is never stored) and is a whole dump
+  offprint backup restore [--from FILE] [--unchecked] [--yes]
+                                             replace the local database with the committed backup's (or a dump
+                                             file's), keeping an encrypted copy of the one it replaces
   offprint adapter setup [--yes]             set up on this Mac what the site's host adapter needs (each step says
                                              what it will do, and asks first; --yes: yes to each)
   offprint adapter doctor                    check what the site's host adapter needs, and the live site: one ok or
@@ -536,16 +567,19 @@ it. Its last line is the table's row. It needs Docker and the network (the plugi
 | `hosts-block.sh` | `bash tests/hosts-block.test.sh` | no | yes |
 | `host-setup`, `host-undo` | `bash tests/host.test.sh` | no (a pretend machine) | yes |
 | `site.json` loader | `bash tests/config.test.sh` | no | yes |
-| `offprint backup verify` | `bash tests/backup.test.sh` | no (a stand-in `age`) | yes |
+| `offprint backup verify` and `restore` | `bash tests/backup.test.sh` | no (stand-in `age` and `docker`) | yes |
 | Names that must not be in the tool | `bash tests/names.test.sh` | no | yes |
 | End to end | `bash tests/e2e.sh` | yes | no |
 | A plugin that replaces WordPress's sitemaps | `bash tests/compat-seo.sh SLUG` | yes, and the network | no |
 | The backup, with the real `age` | `bash tests/backup-real.sh` | no (but `age`, installed) | no |
+| A restore, with the real tools | `bash tests/restore-real.sh` | yes, and `age` and `mkcert` | no |
 | A running site | `bash tests/site.test.sh SITE_DIR` | yes (a set-up site) | no |
 
 The first thirteen need only bash, git, PHP, Perl and Node. The suites that publish use a stand-in `age`
 (`tests/fixtures/age-standin`); `tests/backup-real.sh` runs the real one the same ways, and is run on the Mac before a
-change to the backup is merged. `tests/e2e.sh` builds a throwaway WordPress in the compose
+change to the backup is merged. `tests/restore-real.sh` makes a real, throwaway site folder (`offprint new`,
+`offprint setup-wp`, a publish with `--no-push`) in the compose project `offprint-restore-real`, restores into it
+three ways, and removes it; it never runs the host set-up or `sudo`. `tests/e2e.sh` builds a throwaway WordPress in the compose
 project `offprint-e2e` and removes it afterwards; `tests/compat-seo.sh` builds the same one (`tests/e2e-setup.sh` is
 their shared set-up), so the two never run at the same time: each refuses to start while that project exists.
 `tests/site.test.sh` reads a real, running site and changes nothing.

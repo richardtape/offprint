@@ -4,7 +4,8 @@
  *
  * Usage: php lib/config.php SITE_DIR
  *
- * Exit 0: the ten SITE_* lines on stdout (the keys lib/site.sh reads), then ADAPTER_NAME and one
+ * Exit 0: the ten SITE_* lines on stdout (the keys lib/site.sh reads), then, for a site.json with a
+ * "backup" block, SITE_BACKUP_RECIPIENTS and SITE_BACKUP_TO, then ADAPTER_NAME and one
  * ADAPTER_SET_<KEY> line per adapter setting, nothing on stderr.
  * Exit 2: nothing on stdout; one line per problem on stderr, each starting `site.json: "<field>"`.
  *
@@ -19,8 +20,12 @@ const MAX_DEPTH = 8;
 const HOST = '[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+';
 const KNOWN = [
     'format', 'name', 'public_url', 'local_host', 'local_ip4', 'local_ip6',
-    'tls_port', 'http_port', 'agent_label', 'daemon_prefix', 'adapter',
+    'tls_port', 'http_port', 'agent_label', 'daemon_prefix', 'adapter', 'backup',
 ];
+/** The top-level objects whose keys are named with their block ("adapter.name"), here and in every message. */
+const BLOCKS = ['adapter', 'backup'];
+/** An age X25519 public key: age1 and 58 characters of the encoding's alphabet. Public, so it may be shown. */
+const AGE_RECIPIENT = '/\Aage1[ac-hj-np-z02-9]{58}\z/D';
 const ADAPTER_MAX_SETTINGS = 20;
 
 function fail_usage(): never
@@ -50,7 +55,8 @@ function duplicate_keys(string $json): array
     $stack = [];            // one entry per open container: array of seen keys, or null for an array
     $expectKey = false;
     $topKey = null;         // the last key seen directly in the outermost object
-    $adapterAt = -1;        // stack index of the top-level "adapter" object, while inside it
+    $blockAt = -1;          // stack index of a top-level block (BLOCKS: "adapter", "backup"), while inside it
+    $block = '';            // and its name
     $len = strlen($json);
     for ($i = 0; $i < $len; $i++) {
         $c = $json[$i];
@@ -64,8 +70,8 @@ function duplicate_keys(string $json): array
                 $top = count($stack) - 1;
                 if (is_string($key) && $top >= 0 && $stack[$top] !== null) {
                     if (isset($stack[$top][$key])) {
-                        // inside the adapter block a key is named with its block, so "name" there is not the site's
-                        $dups[$top === $adapterAt ? 'adapter.' . $key : $key] = true;
+                        // inside a block a key is named with its block, so "name" in the adapter's is not the site's
+                        $dups[$top === $blockAt ? $block . '.' . $key : $key] = true;
                     }
                     $stack[$top][$key] = true;
                     if ($top === 0) {
@@ -76,8 +82,9 @@ function duplicate_keys(string $json): array
             }
             $i = $j;
         } elseif ($c === '{') {
-            if (count($stack) === 1 && $topKey === 'adapter') {
-                $adapterAt = 1;
+            if (count($stack) === 1 && in_array($topKey, BLOCKS, true)) {
+                $blockAt = 1;
+                $block = $topKey;
             }
             $stack[] = [];
             $expectKey = true;
@@ -86,8 +93,8 @@ function duplicate_keys(string $json): array
             $expectKey = false;
         } elseif ($c === '}' || $c === ']') {
             array_pop($stack);
-            if (count($stack) <= $adapterAt) {
-                $adapterAt = -1;
+            if (count($stack) <= $blockAt) {
+                $blockAt = -1;
             }
             $expectKey = false;
         } elseif ($c === ',') {
@@ -297,6 +304,49 @@ if (array_key_exists('adapter', $data)) {
     }
 }
 
+// backup: { "recipients": [one or two age public keys], "to": "repo" }: who the database backup is encrypted to, and
+// where it is sent ("repo", the site's own repository, is the only place yet, and what a missing "to" means). Absent
+// means no backup lines at all: a publish refuses then, saying how to add one. A value that is not a public key is
+// never repeated in the message: it may be the private key, pasted by mistake.
+$backupRecipients = null;
+$backupTo = 'repo';
+if (array_key_exists('backup', $data)) {
+    $raw = $raw ?? json_decode($text, false, MAX_DEPTH);   // objects stay objects, so {} and [] differ
+    $b = $data['backup'];
+    if (!is_object($raw->backup ?? null) || !is_array($b)) {
+        $problems[] = 'site.json: "backup" must be an object with "recipients".';
+    } else {
+        foreach (array_keys($b) as $k) {
+            if (!in_array((string) $k, ['recipients', 'to'], true)) {
+                $problems[] = 'site.json: "backup.' . show((string) $k) . '" is not a known field.';
+            }
+        }
+        $r = $b['recipients'] ?? null;
+        if (!is_array($r) || !is_array($raw->backup->recipients ?? null) || count($r) < 1 || count($r) > 2) {
+            $problems[] = 'site.json: "backup.recipients" must be a list of one or two age public keys.';
+        } else {
+            $keys = [];
+            foreach ($r as $v) {
+                if (!is_string($v) || preg_match(AGE_RECIPIENT, $v) !== 1) {
+                    $keys = null;
+                    break;
+                }
+                $keys[] = $v;
+            }
+            if ($keys === null) {
+                $problems[] = 'site.json: "backup.recipients" must be a list of one or two age public keys (each age1 and 58 more characters).';
+            } elseif (count(array_unique($keys)) !== count($keys)) {
+                $problems[] = 'site.json: "backup.recipients" names the same key twice.';
+            } else {
+                $backupRecipients = implode(' ', $keys);
+            }
+        }
+        if (array_key_exists('to', $b) && $b['to'] !== 'repo') {
+            $problems[] = 'site.json: "backup.to" must be "repo".';
+        }
+    }
+}
+
 if ($problems !== []) {
     fwrite(STDERR, implode("\n", $problems) . "\n");
     exit(2);
@@ -316,6 +366,10 @@ $out = [
 ];
 foreach ($out as $k => $v) {
     echo $k, "\t", $v, "\n";
+}
+if ($backupRecipients !== null) {
+    echo "SITE_BACKUP_RECIPIENTS\t", $backupRecipients, "\n";
+    echo "SITE_BACKUP_TO\t", $backupTo, "\n";
 }
 echo "ADAPTER_NAME\t", $adapterName, "\n";
 foreach ($adapterSettings as $k => $v) {

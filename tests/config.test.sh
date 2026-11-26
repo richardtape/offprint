@@ -71,12 +71,14 @@ SITE_HTTP_PORT${TAB}4998
 SITE_AGENT_LABEL${TAB}local.offprint.example.publish
 SITE_DAEMON_PREFIX${TAB}local.offprint.example"
 expected_all="$expected_fixture
+SITE_BACKUP_RECIPIENTS${TAB}age1$(printf 'q%.0s' $(seq 1 58))
+SITE_BACKUP_TO${TAB}repo
 ADAPTER_NAME${TAB}none"
 site="$root/tests/fixtures"; run
-if [ "$code" -eq 0 ] && [ -z "$err" ] && [ "$out" = "$expected_all" ]; then ok "the fixture loads and prints exactly the ten keys, then ADAPTER_NAME none, in order"; else bad "fixture (exit $code, out: $out, err: $err)"; fi
+if [ "$code" -eq 0 ] && [ -z "$err" ] && [ "$out" = "$expected_all" ]; then ok "the fixture loads and prints exactly the ten keys, its backup's two, then ADAPTER_NAME none, in order"; else bad "fixture (exit $code, out: $out, err: $err)"; fi
 php "$root/lib/config.php" "$site" 2>/dev/null | od -c | grep -q '\\r' && bad "no carriage returns in output" || ok "no carriage returns in output"
 
-newsite; with '"local_host":"blog.test"'; loads "an explicit local_host" "$(printf '%s' "$expected_all" | sed "s/mysite.test/blog.test/")"
+newsite; with '"local_host":"blog.test"'; loads "an explicit local_host" "$(printf '%s' "$expected_all" | sed "s/mysite.test/blog.test/" | grep -v '^SITE_BACKUP_')"
 newsite; put "{${base/\"example\"/\"abc\"}}"
 run
 if [ "$code" -eq 0 ] && contains "$out" "SITE_NAME${TAB}abc" && contains "$out" "SITE_AGENT_LABEL${TAB}local.offprint.abc.publish" && contains "$out" "SITE_DAEMON_PREFIX${TAB}local.offprint.abc" && contains "$out" "SITE_LOCAL_HOST${TAB}wp.local"; then ok "defaults: name 'abc' gives the default labels and wp.local"; else bad "default labels ($out / $err)"; fi
@@ -267,6 +269,49 @@ newsite; put "{$base,\"agent_label\":\"a\\\"b\",\"name\":\"other\"}"
 refused_text "a string value with an escaped quote, then a real duplicate key" 'site.json: "name" appears more than once'
 newsite; put "{$base,\"adapter\":{\"name\":\"x\",\"a\":\"b\\\"c\",\"name\":\"y\"}}"
 refused_text "an escaped quote in an adapter value, then name twice" 'site.json: "adapter.name" appears more than once'
+
+# backup block: the age public keys the database backup is encrypted to, and where it is sent
+Q62="age1$(printf 'q%.0s' $(seq 1 58))"; P62="age1$(printf 'p%.0s' $(seq 1 58))"
+backup_lines() { printf '%s' "${expected_fixture/mysite.test/wp.local}
+SITE_BACKUP_RECIPIENTS${TAB}$1
+SITE_BACKUP_TO${TAB}repo
+ADAPTER_NAME${TAB}none"; }
+newsite; with "\"backup\":{\"recipients\":[\"$Q62\"]}"
+loads "a backup block with one recipient: the two backup lines after the ten, to repo by default" "$(backup_lines "$Q62")"
+newsite; with "\"backup\":{\"recipients\":[\"$Q62\",\"$P62\"],\"to\":\"repo\"}"
+loads "a backup block with two recipients and to repo: both, in the file's order, on one line" "$(backup_lines "$Q62 $P62")"
+newsite; put "{$base}"; run
+if [ "$code" -eq 0 ] && ! contains "$out" "SITE_BACKUP_"; then ok "no backup block: config.php prints no SITE_BACKUP_ line"; else bad "no backup block (exit $code, out: $out, err: $err)"; fi
+backup_msg='site.json: "backup" must be an object with "recipients".'
+list_msg='site.json: "backup.recipients" must be a list of one or two age public keys.'
+key_msg='site.json: "backup.recipients" must be a list of one or two age public keys (each age1 and 58 more characters).'
+newsite; with '"backup":"yes"';                          refused_text "a backup that is a string" "$backup_msg"
+newsite; with '"backup":[]';                             refused_text "a backup that is a list" "$backup_msg"
+newsite; with '"backup":{}';                             refused_text "a backup with no recipients" "$list_msg"
+newsite; with '"backup":{"recipients":[]}';              refused_text "an empty list of recipients" "$list_msg"
+newsite; with "\"backup\":{\"recipients\":\"$Q62\"}"; refused_text "recipients that is a string, not a list" "$list_msg"
+newsite; with "\"backup\":{\"recipients\":{\"a\":\"$Q62\"}}"; refused_text "recipients that is an object" "$list_msg"
+newsite; with "\"backup\":{\"recipients\":[\"$Q62\",\"$P62\",\"age1$(printf 'z%.0s' $(seq 1 58))\"]}"; refused_text "three recipients" "$list_msg"
+newsite; with '"backup":{"recipients":["age1short"]}';   refused_text "a recipient that is too short" "$key_msg"
+newsite; with "\"backup\":{\"recipients\":[\"${Q62}q\"]}"; refused_text "a recipient one character too long" "$key_msg"
+newsite; with "\"backup\":{\"recipients\":[\"AGE1$(printf 'Q%.0s' $(seq 1 58))\"]}"; refused_text "a recipient in capitals" "$key_msg"
+newsite; with "\"backup\":{\"recipients\":[\"age1$(printf 'b%.0s' $(seq 1 58))\"]}"; refused_text "a recipient with a letter the encoding never uses (b)" "$key_msg"
+newsite; with "\"backup\":{\"recipients\":[\"$Q62\\n\"]}"; refused_text "a recipient with a trailing newline" "$key_msg"
+newsite; with '"backup":{"recipients":[7]}';             refused_text "a recipient that is a number" "$key_msg"
+newsite; with "\"backup\":{\"recipients\":[\"$Q62\",null]}"; refused_text "a second recipient that is null" "$key_msg"
+# A private key pasted where the public one belongs: refused, and never repeated (the message goes to a terminal, a log
+# and var/status.json).
+secret="AGE-SECRET-KEY-1$(printf 'Q%.0s' $(seq 1 58))"
+newsite; with "\"backup\":{\"recipients\":[\"$secret\"]}"; refused_text "a private key given as a recipient" "$key_msg"
+if ! contains "$err$out" "AGE-SECRET-KEY"; then ok "a private key given as a recipient is not repeated in the message"; else bad "a private key was echoed ($err)"; fi
+newsite; with "\"backup\":{\"recipients\":[\"$Q62\",\"$Q62\"]}"; refused_text "the same recipient twice" 'site.json: "backup.recipients" names the same key twice.'
+newsite; with "\"backup\":{\"recipients\":[\"$Q62\"],\"to\":\"elsewhere\"}"; refused_text "a destination that isn't repo" 'site.json: "backup.to" must be "repo".'
+newsite; with "\"backup\":{\"recipients\":[\"$Q62\"],\"to\":3}"; refused_text "a destination that is a number" 'site.json: "backup.to" must be "repo".'
+newsite; with "\"backup\":{\"recipients\":[\"$Q62\"],\"colour\":1}"; refused_text "an unknown key in the backup block" 'site.json: "backup.colour" is not a known field.'
+newsite; with "\"backup\":{\"recipients\":[\"$Q62\"],\"recipients\":[\"$P62\"]}"; refused_text "recipients twice in the backup block" 'site.json: "backup.recipients" appears more than once'
+newsite; with "\"backup\":{\"recipients\":[\"$Q62\"]},\"adapter\":{\"name\":\"x\",\"recipients\":\"a\",\"recipients\":\"b\"}"
+refused_text "a duplicate in the adapter block after a backup block is still named with adapter" 'site.json: "adapter.recipients" appears more than once'
+newsite; with "\"backup\":{\"recipients\":[\"$Q62\"]},\"backup\":{\"recipients\":[\"$P62\"]}"; refused_text "the backup key twice" 'site.json: "backup" appears more than once'
 newsite; put "{$base}"; head -c 70000 /dev/zero | tr '\0' ' ' >> "$site/site.json"
 refused_text "a file over 64 KB" '64'
 newsite; put "{$base}"; printf '\0' >> "$site/site.json"
@@ -397,6 +442,12 @@ shell_cases() {  # $1 = bash to test with
   # offprint_load_site: the fixture
   sh_out="$(cd / && OFFPRINT_SITE="$root/tests/fixtures" "$B" -c ". '$root/lib/site.sh'; offprint_find_site; offprint_load_site; for v in SITE_NAME SITE_PUBLIC_URL SITE_PUBLIC_HOST SITE_LOCAL_HOST SITE_IP4 SITE_IP6 SITE_TLS_PORT SITE_HTTP_PORT SITE_AGENT_LABEL SITE_DAEMON_PREFIX; do printf '%s\t%s\n' \$v \"\${!v}\"; done" 2>&1)"; sh_code=$?
   if [ "$sh_code" -eq 0 ] && [ "$sh_out" = "$expected_fixture" ]; then ok "[$t] offprint_load_site sets the ten variables"; else bad "[$t] load ($sh_code: $sh_out)"; fi
+  # the backup's two values: set from the block, and empty (never inherited) without one
+  sh_out="$(cd / && OFFPRINT_SITE="$root/tests/fixtures" "$B" -c ". '$root/lib/site.sh'; offprint_find_site; offprint_load_site; printf '%s|%s' \"\$SITE_BACKUP_RECIPIENTS\" \"\$SITE_BACKUP_TO\"" 2>&1)"
+  if [ "$sh_out" = "age1$(printf 'q%.0s' $(seq 1 58))|repo" ]; then ok "[$t] offprint_load_site sets SITE_BACKUP_RECIPIENTS and SITE_BACKUP_TO"; else bad "[$t] load backup ($sh_out)"; fi
+  newsite; put "{$base}"
+  sh_out="$(cd / && SITE_BACKUP_RECIPIENTS=inherited SITE_BACKUP_TO=inherited OFFPRINT_SITE="$site" "$B" -c ". '$root/lib/site.sh'; offprint_find_site; offprint_load_site; printf '%s|%s' \"\$SITE_BACKUP_RECIPIENTS\" \"\$SITE_BACKUP_TO\"" 2>&1)"
+  if [ "$sh_out" = "|" ]; then ok "[$t] offprint_load_site, no backup block: both empty, whatever the environment held"; else bad "[$t] load no backup ($sh_out)"; fi
   # adapter variables
   newsite; cp "$root/tests/fixtures/site.json" "$site/"
   sh_out="$(cd / && OFFPRINT_SITE="$site" "$B" -c ". '$root/lib/site.sh'; offprint_find_site; offprint_load_site; printf '%s|%s' \"\$ADAPTER_NAME\" \"\$(compgen -v | grep -c '^ADAPTER_SET_')\"" 2>&1)"

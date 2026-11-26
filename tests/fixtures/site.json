@@ -6,5 +6,6 @@
   "local_ip4": "127.0.0.9",
   "local_ip6": "fd00::9",
   "tls_port": 4999,
-  "http_port": 4998
+  "http_port": 4998,
+  "backup": {"recipients": ["age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"]}
 }

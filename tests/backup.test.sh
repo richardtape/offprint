@@ -183,7 +183,7 @@ check "$t: kept, then reset, imported, and made reachable, in that order" "$all_
 check "$t: what was imported is the backup's dump, byte for byte" "$(dump_whole)" "$(cat "$S/imported.sql")"
 check "$t: one kept copy, named by the time" yes "$(printf '%s' "$kept1" | grep -Eq '^[0-9]{8}-[0-9]{6}\.sql\.age$' && echo yes)"
 check "$t: the kept copy is the database as it was, encrypted to site.json's recipient" "-> stand-in $Q62|1" "$(sed -n 2p "$c/var/before-restore/$kept1")|$(grep -c CURRENT "$c/var/before-restore/$kept1")"
-check "$t: var/before-restore is the owner's alone" 700 "$(stat -f %Lp "$c/var/before-restore" 2>/dev/null || stat -c %a "$c/var/before-restore")"
+check "$t: var/before-restore is the owner's alone" 700 "$(stat -c %a "$c/var/before-restore" 2>/dev/null || stat -f %Lp "$c/var/before-restore")"
 check "$t: home and siteurl are set to the site's local address" 2 "$(grep -c 'wp option update .* https://mysite.test' "$S/docker.calls")"
 check "$t: every WP-CLI call loads no plugin and no theme" 0 "$(grep ' wp ' "$S/docker.calls" | grep -vc -- '--skip-plugins --skip-themes')"
 check "$t: the key was given to age on standard input, never in its environment" no "$(cat "$S/age.env")"

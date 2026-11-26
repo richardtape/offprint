@@ -9,7 +9,8 @@
 #       age_fails: exits 1 and writes nothing.   age_empty: exits 0, OUT empty.   age_junk: exits 0, OUT is "junk".
 #   age -d -i - FILE                             "decrypts": reads the key from standard input (one line), and prints
 #                                                FILE from its fourth line on when the key is AGE-SECRET-KEY-1TEST, else
-#                                                fails as the real tool does. Only the key's length is noted.
+#                                                fails as the real tool does. Only the key's length is noted, and,
+#                                                in STUB_DIR/age.env, whether the key is in its environment.
 set -u
 : "${STUB_DIR:?the stand-in age needs STUB_DIR}"
 
@@ -17,6 +18,7 @@ if [ "${1:-}" = -d ]; then
   [ "${2:-}" = -i ] && [ "${3:-}" = - ] && [ $# -eq 4 ] || { echo "the stand-in age: unexpected decryption call: $*" >&2; exit 99; }
   IFS= read -r key || true
   echo "-d -i - $4 (a key of ${#key} characters on standard input)" >> "$STUB_DIR/age.calls"
+  if [ -n "$key" ] && env | grep -qF -- "$key"; then echo yes > "$STUB_DIR/age.env"; else echo no > "$STUB_DIR/age.env"; fi
   [ "$(head -c 21 "$4" 2>/dev/null)" = "age-encryption.org/v1" ] || { echo "age: error: failed to read header: parsing age header: unexpected intro" >&2; exit 1; }
   [ "$key" = AGE-SECRET-KEY-1TEST ] || { echo "age: error: no identity matched any of the recipients" >&2; exit 1; }
   tail -n +4 "$4"

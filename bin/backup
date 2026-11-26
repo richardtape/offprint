@@ -8,7 +8,8 @@
 # asked for here (not echoed), or read as one line from standard input when that isn't a terminal. It is held in one
 # shell variable, goes to age on a pipe from the shell's own printf, and is unset straight after: it never reaches a
 # file, a process's arguments, the environment of any process, a log or set -x output (tracing is turned off first
-# thing, as os/darwin/secret does, whether it came from bash -x or from an inherited SHELLOPTS). What age decrypts is
+# thing, as os/darwin/secret does, whether it came from bash -x or from an inherited SHELLOPTS; and the variable is
+# unset before it is used, so one of its name that the owner's shell had exported is not exported again with the key). What age decrypts is
 # streamed into the check of its last line and is never written anywhere, nor printed.
 #
 # Prints one line: "ok: ..." (exit 0) or "problem: ..." with what to do (exit 1). Exit 2: a usage mistake, or no site.
@@ -52,6 +53,9 @@ commit="$(git rev-parse --short HEAD 2>/dev/null < /dev/null)" || commit="?"
 
 command -v age > /dev/null 2>&1 || problem "age isn't installed; install it (brew install age) and verify again."
 
+# (unset first: set +a stops new variables being exported, but one that arrived exported stays so, and what is read
+# into it would then be in the environment of age and awk)
+unset key rc
 key=""
 if [ -t 0 ]; then
   printf "Paste the backup's private key (AGE-SECRET-KEY-…), then Return: " >&2

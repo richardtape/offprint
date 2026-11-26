@@ -51,6 +51,12 @@ check "$t: age was given the key on standard input, and the committed file" "-d 
 lacks "$t: the key is not in the output" "$KEY" "$out"; untouched "$t"
 check "$t: nothing of the dump is printed" 0 "$(printf '%s' "$out" | grep -c 'INSERT INTO')"
 
+# A variable of the name the script uses, already exported in the owner's shell: the key read into it must not be
+# exported with it, into age's environment (or any child's).
+newcase; t="a variable named key already exported"
+out="$(cd "$tmp/case$n" && printf '%s\n' "$KEY" | env key=old rc=old PATH="$S/bin:$PATH" STUB_DIR="$S" OFFPRINT_SITE="$c" /bin/bash "$SRC/bin/offprint" backup verify 2>&1)"; code=$?
+check "$t: exits 0" 0 "$code"; check "$t: the key is not in age's environment" no "$(cat "$S/age.env" 2>/dev/null)"; untouched "$t"
+
 # The key must not be traced: by a bash -x the owner runs it under, or by tracing inherited from the environment.
 newcase; t="run under bash -x"
 out="$(cd "$tmp/case$n" && printf '%s\n' "$KEY" | PATH="$S/bin:$PATH" STUB_DIR="$S" OFFPRINT_SITE="$c" /bin/bash -x "$SRC/bin/backup" verify 2>&1)"; code=$?

@@ -347,8 +347,9 @@ it: a publish never rewrites history, so whether to remove it from the repositor
 age -d -i - backup/db.sql.age | offprint wp db import -
 ```
 
-`age` waits for the private key: paste it and press Return. This replaces the local WordPress's whole database with
-the backup's. It has not been made a command or tested as one.
+`age` waits for the private key: paste it, press Return, then Ctrl-D (it reads until the end of its input). Unlike
+`offprint backup verify`, `age` shows the key as you paste it, so clear the terminal's scrollback afterwards. This
+replaces the local WordPress's whole database with the backup's. It has not been made a command or tested as one.
 
 `wp-content/` (uploads, themes, plugins) is committed as it is, not encrypted.
 

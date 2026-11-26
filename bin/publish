@@ -592,7 +592,10 @@ BACKUP_NEW=1; BACKUP_NOTE=""; backup_bytes=0
 # in site.json: public keys only, so a publish holds no secret of the backup's, and only the owner's private key, kept
 # off this Mac, opens it. age's output differs on every run, so encrypting an unchanged dump again would make a commit
 # of every publish: the committed backup is kept when var/backup.id (written by the last publish, where WordPress
-# can't write) names this same dump and these same recipients, and the file in backup/ is still the commit's. Anything
+# can't write) names this same dump and these same recipients on its first line, and on its second the very file that
+# is both in backup/ and in the last commit (its git id). The second line matters: a publish that encrypted a newer
+# dump and noted it, then failed before committing, leaves a note that is not about the committed file, and with
+# backup/ put back as the commit has it (a git checkout) the older backup would pass for the newer dump's. Anything
 # else (no note, a note that is a link, other recipients, a file changed or missing) and it is encrypted again. What
 # age wrote is taken only when age succeeded and it is an age file. The readable dump is removed on every path.
 backup_make() {
@@ -611,7 +614,7 @@ backup_make() {
     && [ "$(head -n 1 "$VAR/backup.id" 2>/dev/null)" = "$BACKUP_NOTE" ]; then
     head_blob="$(git rev-parse -q --verify 'HEAD:backup/db.sql.age' 2>/dev/null < /dev/null)" || head_blob=""
     disk_blob="$(git hash-object --no-filters -- backup/db.sql.age 2>>"$LOG" < /dev/null)" || disk_blob=""
-    if [ -n "$head_blob" ] && [ "$head_blob" = "$disk_blob" ]; then BACKUP_NEW=0; fi
+    if [ -n "$head_blob" ] && [ "$head_blob" = "$disk_blob" ] && [ "$(sed -n 2p "$VAR/backup.id" 2>/dev/null)" = "$head_blob" ]; then BACKUP_NEW=0; fi
   fi
   if [ "$BACKUP_NEW" = 1 ]; then
     set --
@@ -631,6 +634,7 @@ backup_make() {
 # so they are told, once: on the publish that removes it. The note of what was encrypted is written last, and replaces
 # whatever is at its name (never written through a link).
 backup_send_repo() {
+  local sealed_blob
   mkdir -p backup || fail "Couldn't create the backup folder"
   [ -z "$(find "${sealed}" -size +99614720c 2>/dev/null)" ] || { rm -f "$sealed"; fail "The database backup is over 95 MB and GitHub would refuse it"; }
   if [ "$BACKUP_NEW" = 1 ]; then
@@ -642,7 +646,9 @@ backup_send_repo() {
   fi
   rm -f backup/db.sql || fail "Couldn't remove the unencrypted backup/db.sql; nothing was committed"
   rm -f "$VAR/backup.id"
-  printf '%s\n' "$BACKUP_NOTE" > "$VAR/backup.id" || fail "Couldn't note the database backup in var/backup.id; nothing was committed"
+  sealed_blob="$(git hash-object --no-filters -- backup/db.sql.age 2>>"$LOG" < /dev/null)" && [ -n "$sealed_blob" ] \
+    && printf '%s\n%s\n' "$BACKUP_NOTE" "$sealed_blob" > "$VAR/backup.id" \
+    || fail "Couldn't note the database backup in var/backup.id; nothing was committed"
 }
 
 backup_make

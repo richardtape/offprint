@@ -82,7 +82,9 @@ cat > "$tmp/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 echo PRIVATE
 STUB
-chmod +x "$tmp/bin/docker" "$tmp/bin/curl" "$tmp/bin/gh"
+# age, which encrypts the database backup: the suites' shared stand-in
+cp "$SRC/tests/fixtures/age-standin" "$tmp/bin/age"
+chmod +x "$tmp/bin/docker" "$tmp/bin/curl" "$tmp/bin/gh" "$tmp/bin/age"
 
 n=0
 # site_json [NAME [SETTINGS]]: the case's site.json, naming the adapter NAME (with SETTINGS, more JSON members, in its
@@ -109,7 +111,7 @@ newcase() {
   git init -q -b main "$c"
   git -C "$c" config user.email t@example.com; git -C "$c" config user.name Test
   cp "$SRC/templates/site.gitignore" "$c/.gitignore"
-  echo '<html><body>Old</body></html>' > "$c/site/index.html"; echo 'OLD DUMP' > "$c/backup/db.sql"; echo old > "$c/wp-content/keep.txt"
+  echo '<html><body>Old</body></html>' > "$c/site/index.html"; echo 'OLD BACKUP' > "$c/backup/db.sql.age"; echo old > "$c/wp-content/keep.txt"
   # This Offprint's plugin, as setup-wp puts it in a site and commits it (a publish refuses to commit any other).
   mkdir -p "$c/wp-content/mu-plugins"; cp -R "$SRC/plugin/offprint.php" "$SRC/plugin/offprint" "$c/wp-content/mu-plugins/"
   git -C "$c" add -A && git -C "$c" commit -q -m initial
@@ -655,7 +657,7 @@ dpub --no-push; t="a SHA-256 repository (its ids are 64 hex digits)"
 check "$t: refused" "1|failed" "$code|$(js state)"; valid "$t"
 check "$t: saying why" "Git's ids in this site folder are 64 hex digits (a SHA-256 repository?), and the publish's id, which offprint.json gives the live site, must be 40; nothing was published." "$(js message)"
 nocommit "$t"; check "$t: no offprint.json written" no "$(exists "$c/site/offprint.json")"
-no_docker "$t"; oldsite "$t"; check "$t: the dump as it was" "OLD DUMP" "$(cat "$c/backup/db.sql")"
+no_docker "$t"; oldsite "$t"; check "$t: the backup as it was" "OLD BACKUP" "$(cat "$c/backup/db.sql.age")"
 dpub --dry-run; t="the same, a dry run"
 check "$t: refused the same way, nothing exported" "1|failed|no" "$code|$(js state)|$(exists "$S/docker.calls")"
 # The 40 hex digits are offprint.json's: an adapter with a confirm of its own (none, here) publishes from such a

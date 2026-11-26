@@ -149,13 +149,15 @@ case "${1:-}" in
 esac
 exit 0
 STUB
-  chmod +x "$S/bin/docker" "$S/bin/curl" "$S/bin/mv" "$S/bin/gh" "$S/bin/mkcert"
+  # age, which encrypts the database backup: the suites' shared stand-in (tests/fixtures/age-standin)
+  cp "$SRC/tests/fixtures/age-standin" "$S/bin/age"
+  chmod +x "$S/bin/docker" "$S/bin/curl" "$S/bin/mv" "$S/bin/gh" "$S/bin/mkcert" "$S/bin/age"
   # the repo, with an old site, an old backup, and a bare origin
   git init -q -b main "$c"
   git -C "$c" config user.email t@example.com; git -C "$c" config user.name Test
   cp "$SRC/templates/site.gitignore" "$c/.gitignore"   # the one a site starts with, so what it leaves out is tested too
   echo '/site/build.json' >> "$c/.gitignore"   # (the workflow writes it on the live site; a site with that host ignores it)
-  echo '<html><body>Old</body></html>' > "$c/site/index.html"; echo 'OLD DUMP' > "$c/backup/db.sql"
+  echo '<html><body>Old</body></html>' > "$c/site/index.html"; echo 'OLD BACKUP' > "$c/backup/db.sql.age"
   echo old > "$c/wp-content/keep.txt"
   # This Offprint's plugin, as setup-wp puts it in a site and commits it (a publish refuses to commit any other); with
   # no_plugin=1 (bare_newcase), none, as before setup-wp's first run.
@@ -200,7 +202,7 @@ compose_only() {
 nosite_msg="Not in an Offprint site folder (no site.json here or above); cd into one, or set OFFPRINT_SITE."
 mkdir -p "$tmp/nosite"
 oldsite() { check "$1: site/ unchanged" "<html><body>Old</body></html>" "$(cat "$c/site/index.html")"; [ ! -e "$c/site/404.html" ] && ok "$1: no new files in site/" || bad "$1: site/ gained files"; }
-oldbackup() { check "$1: backup/db.sql unchanged" "OLD DUMP" "$(cat "$c/backup/db.sql")"; }
+oldbackup() { check "$1: backup/db.sql.age unchanged" "OLD BACKUP" "$(cat "$c/backup/db.sql.age")"; }
 
 # --- export fails ---
 newcase; echo 1 > "$S/export_exit"
@@ -239,7 +241,7 @@ valid "$t"; oldsite "$t"; oldbackup "$t"; nocommit "$t"
 newcase; pub --no-push; t="success with --no-push"
 check "$t: exits 0" 0 "$code"; valid "$t"
 check "$t: site/ equals the export" "" "$(diff -r "$c/site" "$S/fixture" 2>&1)"
-check "$t: db.sql is the new dump" "yes" "$(grep -q 'INSERT INTO t' "$c/backup/db.sql" && echo yes)"
+check "$t: db.sql.age is the new dump, encrypted" "yes" "$(grep -q 'INSERT INTO t' "$c/backup/db.sql.age" && echo yes)"
 check "$t: one new commit" "$((commits0 + 1))" "$(git -C "$c" rev-list --count HEAD)"
 check "$t: commit touches only site/, wp-content/, backup/" "" \
   "$(git -C "$c" show --name-only --format= HEAD | grep -v '^site/\|^wp-content/\|^backup/')"
@@ -755,20 +757,137 @@ check "$t: and site/ has the folder" yes "$([ -d "$c/site/ro" ] && echo yes)"
 newcase; mkdir "$c/site.old" "$c/site.old/ro"; echo x > "$c/site.old/ro/f"; chmod 555 "$c/site.old/ro"; pub --no-push; t="a read-only leftover site.old"
 check "$t: publishes" 0 "$code"; check "$t: site.old is gone" no "$([ -e "$c/site.old" ] && echo yes || echo no)"
 
-# --- the backup is always in the commit, whatever ignores *.sql ---
-dump_bytes() { wc -c < "$S/dump_body" | tr -d ' '; }
-newcase; printf '*.sql\n' >> "$c/.git/info/exclude"; pub; t="*.sql in .git/info/exclude"
-check "$t: live" live "$(js state)"; check "$t: backup/db.sql is in the commit, as dumped" "$(dump_bytes)" "$(git -C "$c" cat-file -s HEAD:backup/db.sql 2>&1)"
-check "$t: and on GitHub" 1 "$(git -C "$O" show main:backup/db.sql 2>/dev/null | grep -c 'INSERT INTO t')"
-newcase; printf '*.sql\n' > "$S/excludes"; printf '[core]\n\texcludesFile = %s\n' "$S/excludes" > "$S/gitconfig"
-GIT_CONFIG_GLOBAL="$S/gitconfig" pub; t="*.sql in git's excludes file"
-check "$t: live" live "$(js state)"; check "$t: backup/db.sql is in the commit, as dumped" "$(dump_bytes)" "$(git -C "$c" cat-file -s HEAD:backup/db.sql 2>&1)"
+# --- the backup is always in the commit, whatever ignores *.age ---
+backup_bytes() { wc -c < "$c/backup/db.sql.age" | tr -d ' '; }
+newcase; printf '*.age\n*.sql\n' >> "$c/.git/info/exclude"; pub; t="*.age in .git/info/exclude"
+check "$t: live" live "$(js state)"; check "$t: backup/db.sql.age is in the commit, as written" "$(backup_bytes)" "$(git -C "$c" cat-file -s HEAD:backup/db.sql.age 2>&1)"
+check "$t: and on GitHub" 1 "$(git -C "$O" show main:backup/db.sql.age 2>/dev/null | grep -c 'INSERT INTO t')"
+newcase; printf '*.age\n' > "$S/excludes"; printf '[core]\n\texcludesFile = %s\n' "$S/excludes" > "$S/gitconfig"
+GIT_CONFIG_GLOBAL="$S/gitconfig" pub; t="*.age in git's excludes file"
+check "$t: live" live "$(js state)"; check "$t: backup/db.sql.age is in the commit, as written" "$(backup_bytes)" "$(git -C "$c" cat-file -s HEAD:backup/db.sql.age 2>&1)"
 # The owner's own attributes can still filter it (a clean filter that keeps 5 bytes): then the commit would not hold the
-# dump as written, so nothing is committed.
-newcase; printf '*.sql filter=shrink\n' > "$c/.git/info/attributes"; git -C "$c" config filter.shrink.clean 'head -c 5'
-pub --no-push; t="a filter changes backup/db.sql on its way into git"
+# backup as written, so nothing is committed.
+newcase; printf '*.age filter=shrink\n' > "$c/.git/info/attributes"; git -C "$c" config filter.shrink.clean 'head -c 5'
+pub --no-push; t="a filter changes backup/db.sql.age on its way into git"
 check "$t: fails" failed "$(js state)"; valid "$t"; nocommit "$t"
 contains "$t: says so" "The database backup isn't in the commit as it was written" "$(js message)"
+
+# --- the backup is encrypted: to site.json's recipients, with age, and never committed readable ---
+Q62="age1$(printf 'q%.0s' $(seq 1 58))"; P62="age1$(printf 'p%.0s' $(seq 1 58))"
+age_calls() { if [ -f "$S/age.calls" ]; then wc -l < "$S/age.calls" | tr -d ' '; else echo 0; fi; }
+plain_left() { check "$1: no dump, readable or encrypted, is left in var/" "" "$(ls "$c/var" | grep 'db.sql')"; }
+is_age() { git -C "$c" show "HEAD:backup/db.sql.age" 2>/dev/null | head -n 1; }
+# with_recipients LIST: the case's site.json with those recipients ("A" or "A","B", quoted for JSON), committed
+with_recipients() { sed "s/\"recipients\": \[[^]]*\]/\"recipients\": [$1]/" "$c/site.json" > "$c/site.json.new" && mv "$c/site.json.new" "$c/site.json"; git -C "$c" commit -q -am recipients; }
+newcase; pub; t="a publish encrypts the backup"
+check "$t: live" live "$(js state)"
+check "$t: backup/db.sql.age is committed, and nothing else in backup/" "backup/db.sql.age" "$(git -C "$c" ls-tree -r --name-only HEAD -- backup)"
+check "$t: it is an age file" "age-encryption.org/v1" "$(is_age)"
+check "$t: encrypted to site.json's recipient, from var/, into var/" "-r $Q62 -o $(cd "$c" && pwd -P)/var/db.sql.age.tmp $(cd "$c" && pwd -P)/var/db.sql.tmp" "$(cat "$S/age.calls")"
+plain_left "$t"
+check "$t: what the commit holds is what is on disk" "$(backup_bytes)" "$(git -C "$c" cat-file -s HEAD:backup/db.sql.age)"
+check "$t: var/backup.id notes the dump and who it was encrypted to" "$(git hash-object --no-filters "$S/dump_body") $Q62" "$(cat "$c/var/backup.id")"
+check "$t: no warning" "[]" "$(js warnings)"
+newcase; with_recipients "\"$Q62\", \"$P62\""; pub --no-push; t="two recipients in site.json"
+check "$t: committed" "$((commits0 + 2))" "$(git -C "$c" rev-list --count HEAD)"
+contains "$t: both, in site.json's order" "-r $Q62 -r $P62 -o " "$(cat "$S/age.calls")"
+
+# No backup block: refused before anything is exported, a dry run too. (Otherwise the dump would have to be committed
+# readable, or not at all.)
+no_block="site.json has no \"backup\" block, so the database backup can't be encrypted; nothing was published. Make a key (age-keygen), keep it in your password manager, and add its public half: \"backup\": {\"recipients\": [\"age1...\"]}. The README has the steps."
+for flag in "" --dry-run; do
+  newcase; grep -v '"backup"' "$c/site.json" | sed 's/"http_port": 4998,/"http_port": 4998/' > "$c/site.json.new"; mv "$c/site.json.new" "$c/site.json"
+  git -C "$c" commit -q -am "no backup block"; commits0="$(git -C "$c" rev-list --count HEAD)"
+  pub $flag; t="no backup block in site.json${flag:+, $flag}"
+  check "$t: exits 1" 1 "$code"; check "$t: failed" failed "$(js state)"; valid "$t"; nocommit "$t"; oldsite "$t"; oldbackup "$t"
+  check "$t: says what to do" "$no_block" "$(js message)"
+  check "$t: the export never ran" 0 "$(cat "$S/docker.calls" 2>/dev/null | grep -c 'wp offprint export')"
+  check "$t: age never ran" 0 "$(age_calls)"
+done
+# No age on the PATH: the same. no_age_path: the PATH, each folder that holds an age (the real one, on a Mac that has
+# it) replaced by a folder of links to everything else in it.
+no_age_path() {
+  local rest="$PATH:" e out="" d i=0 f
+  while [ -n "$rest" ]; do
+    e="${rest%%:*}"; rest="${rest#*:}"
+    if [ -n "$e" ] && [ -x "$e/age" ]; then
+      i=$((i + 1)); d="$tmp/case$n/noage$i"; mkdir -p "$d"
+      for f in "$e"/*; do case "${f##*/}" in age | age-keygen) ;; *) ln -s "$f" "$d/${f##*/}" 2>/dev/null ;; esac; done
+      e="$d"
+    fi
+    out="${out:+$out:}$e"
+  done
+  printf '%s' "$out"
+}
+no_age="age isn't installed; install it (brew install age) and publish again."
+for flag in "" --dry-run; do
+  newcase; rm "$S/bin/age"; PATH="$(no_age_path)" pub $flag; t="no age on the PATH${flag:+, $flag}"
+  check "control ($t): there is no age on that PATH" no "$(PATH="$S/bin:$(no_age_path)" command -v age > /dev/null && echo yes || echo no)"
+  check "$t: exits 1" 1 "$code"; check "$t: failed" failed "$(js state)"; valid "$t"; nocommit "$t"; oldsite "$t"; oldbackup "$t"
+  check "$t: says what to install" "$no_age" "$(js message)"
+  check "$t: the export never ran" 0 "$(cat "$S/docker.calls" 2>/dev/null | grep -c 'wp offprint export')"
+done
+# age failing, or succeeding with nothing usable written: nothing is committed, the last backup stays, and no dump is
+# left behind.
+cant="The database backup couldn't be encrypted, so nothing was committed; see var/publish.log"
+for how in age_fails age_empty age_junk; do
+  newcase; pub --no-push; before="$(cat "$c/backup/db.sql.age")"; note="$(cat "$c/var/backup.id")"; commits0="$(git -C "$c" rev-list --count HEAD)"
+  printf -- '-- MariaDB dump\nINSERT INTO t VALUES (2);\n\n-- Dump completed\n' > "$S/dump_body"; touch "$S/$how"; pub --no-push; t="$how"
+  check "$t: exits 1" 1 "$code"; check "$t: failed" failed "$(js state)"; valid "$t"; nocommit "$t"
+  check "$t: says so" "$cant" "$(js message)"
+  check "$t: the last backup is untouched" "$before" "$(cat "$c/backup/db.sql.age")"
+  check "$t: var/backup.id is untouched" "$note" "$(cat "$c/var/backup.id")"
+  plain_left "$t"
+done
+# The same dump, the same recipients, the same committed file: kept, not encrypted again (age's output differs on every
+# run, so encrypting again would make a commit of every publish).
+newcase; pub --no-push; one="$(git -C "$c" rev-parse HEAD)"; pub --no-push; t="a second publish, nothing changed"
+check "$t: exits 0" 0 "$code"; check "$t: no second commit" "$one" "$(git -C "$c" rev-parse HEAD)"
+check "$t: age ran once" 1 "$(age_calls)"; plain_left "$t"
+check "$t: the working tree is clean" "" "$(git -C "$c" status --porcelain)"
+# ... but each of these means the committed file can't be taken for this dump's, so it is made again.
+newcase; pub --no-push; with_recipients "\"$Q62\", \"$P62\""; pub --no-push; t="the recipients changed, the database didn't"
+check "$t: exits 0" 0 "$code"; check "$t: age ran again" 2 "$(age_calls)"
+contains "$t: to both" "-r $Q62 -r $P62 -o " "$(tail -n 1 "$S/age.calls")"
+contains "$t: and the commit's backup names both" "$Q62 $P62" "$(git -C "$c" show HEAD:backup/db.sql.age | sed -n 2p)"
+check "$t: var/backup.id names both" "$(git hash-object --no-filters "$S/dump_body") $Q62 $P62" "$(cat "$c/var/backup.id")"
+newcase; pub --no-push; rm "$c/var/backup.id"; pub --no-push; t="var/backup.id lost"
+check "$t: exits 0" 0 "$code"; check "$t: age ran again" 2 "$(age_calls)"; check "$t: the commit's backup is an age file" "age-encryption.org/v1" "$(is_age)"
+newcase; pub --no-push; rm "$c/backup/db.sql.age"; pub --no-push; t="backup/db.sql.age deleted from the folder"
+check "$t: exits 0" 0 "$code"; check "$t: age ran again" 2 "$(age_calls)"; check "$t: the commit's backup is an age file" "age-encryption.org/v1" "$(is_age)"
+check "$t: and it is back on disk" "$(backup_bytes)" "$(git -C "$c" cat-file -s HEAD:backup/db.sql.age)"
+newcase; pub --no-push; echo scribble > "$c/backup/db.sql.age"; pub --no-push; t="backup/db.sql.age overwritten in the folder"
+check "$t: exits 0" 0 "$code"; check "$t: age ran again" 2 "$(age_calls)"; check "$t: the commit's backup is an age file" "age-encryption.org/v1" "$(is_age)"
+newcase; pub --no-push; ln -s "$c/backup/db.sql.age" "$c/var/link"; rm "$c/var/backup.id"; ln -s "$c/var/link" "$c/var/backup.id"; pub --no-push; t="var/backup.id is a link"
+check "$t: exits 0" 0 "$code"; check "$t: age ran again" 2 "$(age_calls)"
+check "$t: the note is a plain file again, and the link's target was not written through" "no|age-encryption.org/v1" "$([ -L "$c/var/backup.id" ] && echo yes || echo no)|$(head -n 1 "$c/backup/db.sql.age")"
+newcase; pub --no-push; printf -- '-- MariaDB dump\nINSERT INTO t VALUES (2);\n\n-- Dump completed\n' > "$S/dump_body"; pub --no-push; t="the database changed"
+check "$t: age ran again" 2 "$(age_calls)"; check "$t: a second commit" "$((commits0 + 2))" "$(git -C "$c" rev-list --count HEAD)"
+check "$t: holding the new dump" 1 "$(git -C "$c" show HEAD:backup/db.sql.age | grep -c 'VALUES (2)')"
+# A site from before: its readable backup/db.sql leaves the commit and the folder, and the owner is told, once, that
+# earlier commits still hold it.
+history="Earlier commits in this repository still hold the database unencrypted (backup/db.sql). A publish never rewrites history; whether to is yours to decide."
+newcase; echo 'OLD DUMP' > "$c/backup/db.sql"; git -C "$c" add -f backup/db.sql; git -C "$c" commit -q -m "a readable dump, as before"; pub --no-push; t="a site that had backup/db.sql"
+check "$t: exits 0" 0 "$code"
+check "$t: the commit holds only the encrypted backup" "backup/db.sql.age" "$(git -C "$c" ls-tree -r --name-only HEAD -- backup)"
+check "$t: backup/db.sql is gone from the folder" no "$([ -e "$c/backup/db.sql" ] && echo yes || echo no)"
+contains "$t: the owner is told about earlier commits" "$history" "$(js warnings)"
+check "$t: told once" 1 "$(js warnings | grep -o 'Earlier commits' | wc -l | tr -d ' ')"
+printf -- '-- MariaDB dump\nINSERT INTO t VALUES (3);\n\n-- Dump completed\n' > "$S/dump_body"; pub --no-push; t="that site's next publish"
+check "$t: exits 0" 0 "$code"; check "$t: no such warning again" 0 "$(js warnings | grep -c 'Earlier commits')"
+# A dry run stops before the backup: nothing of it is made or noted.
+newcase; pub --dry-run; t="a dry run and the backup"
+check "$t: exits 0" 0 "$code"; oldbackup "$t"; check "$t: age never ran" 0 "$(age_calls)"
+check "$t: no var/backup.id" no "$([ -e "$c/var/backup.id" ] && echo yes || echo no)"
+# The size limit is the encrypted file's (it is what is pushed).
+newcase; head -c 99614721 /dev/zero > "$S/big"; cat > "$S/bin/age" <<'STUB'
+#!/usr/bin/env bash
+while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift 2 ;; -r) shift 2 ;; *) shift ;; esac; done
+{ echo "age-encryption.org/v1"; cat "$STUB_DIR/big"; } > "$out"
+STUB
+pub --no-push; t="an encrypted backup over 95 MB"
+check "$t: failed" failed "$(js state)"; nocommit "$t"; oldbackup "$t"; plain_left "$t"
+contains "$t: says so" "The database backup is over 95 MB" "$(js message)"
 
 # --- a merge, rebase, cherry-pick, revert or bisect under way: never publish over it ---
 inprogress="A merge or rebase is in progress in this folder; finish or abort it first."
@@ -905,7 +1024,7 @@ check "$t: exits 0" 0 "$code"; valid "$t"
 check "$t: ends Committed, not pushed" "[checking] Committed, not pushed (--no-push)." "$(printf '%s\n' "$out" | tail -n 1)"
 check "$t: one new commit" "$((commits0 + 1))" "$(git -C "$c" rev-list --count HEAD)"
 check "$t: site/ equals the export" "" "$(diff -r "$c/site" "$S/fixture" 2>&1)"
-check "$t: db.sql is the new dump" "yes" "$(grep -q 'INSERT INTO t' "$c/backup/db.sql" && echo yes)"
+check "$t: db.sql.age is the new dump, encrypted" "yes" "$(grep -q 'INSERT INTO t' "$c/backup/db.sql.age" && echo yes)"
 compose_only "$t"
 check "$t: the site folder reaches docker as one argument, every time" "" \
   "$(W="[compose][-p][example][--project-directory][$(cd "$c" && pwd -P)][-f][$(cd "$T" && pwd -P)/templates/compose.yaml][" \
@@ -1031,7 +1150,7 @@ other_untouched() {
 }
 newcase; other_repo; GIT_DIR="$other/.git" pub --no-push; t="GIT_DIR exported, naming another repository"
 check "$t: publishes" 0 "$code"; check "$t: into the site's own repository" "$((commits0 + 1))" "$(git -C "$c" rev-list --count HEAD)"
-check "$t: the dump is in the site's commit" 1 "$(git -C "$c" show HEAD:backup/db.sql | grep -c 'INSERT INTO t')"
+check "$t: the dump is in the site's commit" 1 "$(git -C "$c" show HEAD:backup/db.sql.age | grep -c 'INSERT INTO t')"
 other_untouched "$t"
 newcase; other_repo; GIT_WORK_TREE="$other" pub --no-push; t="GIT_WORK_TREE exported, naming another folder"
 check "$t: publishes" 0 "$code"; check "$t: into the site's own repository" "$((commits0 + 1))" "$(git -C "$c" rev-list --count HEAD)"

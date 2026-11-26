@@ -1,6 +1,7 @@
 #!/bin/bash
-# Export a site from its local WordPress, check it, replace site/, back up the database, commit, push, then have the
-# site's host make it live and wait until the live site serves it.
+# Export a site from its local WordPress, check it, replace site/, back up the database (encrypted, to the public keys
+# site.json names: see "the database backup" below), commit, push, then have the site's host make it live and wait
+# until the live site serves it.
 #   offprint publish [--dry-run] [--no-push]
 # Run from inside the site folder (or with OFFPRINT_SITE set to it); every path below is the site folder's, and the
 # site's names come from its site.json, through lib/site.sh. Everything about the host (which files it writes, its
@@ -20,7 +21,7 @@ set -u
 # objects, its work tree or its index are (those of git rev-parse --local-env-vars that do, and GIT_NAMESPACE). git
 # exports GIT_DIR inside any hook, so a publish started from one inherits it; left set, they would send every git call
 # below elsewhere, past the check that the site folder is the top of its own repository: the commit, with
-# backup/db.sql, into that other repository, or git's index there changed. pgit sets its own GIT_INDEX_FILE, for its
+# backup/db.sql.age, into that other repository, or git's index there changed. pgit sets its own GIT_INDEX_FILE, for its
 # own calls only.
 unset GIT_DIR GIT_WORK_TREE GIT_IMPLICIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_PREFIX GIT_GRAFT_FILE GIT_SHALLOW_FILE
@@ -259,6 +260,8 @@ cleanup() {
     remove site.new
     [ -z "$IDX" ] || rm -f "$IDX" "$IDX.lock"
     rm -f "$VAR/tree.txt" "$VAR/ignored.z" "$VAR/gh.out" "$VAR/gh.err" "$VAR/check.out" "$VAR/check.err"
+    # The readable dump, and an encrypted one not yet in backup/, never outlive the publish that made them.
+    rm -f "$VAR/db.sql.tmp" "$VAR/db.sql.age.tmp"
     rm -rf "$LOCK"
   fi
 }
@@ -343,6 +346,14 @@ case " $ADAPTER_PREPARE_FILES " in
     fi ;;
 esac
 TIMEOUT="${PUBLISH_TIMEOUT_SECONDS:-$ADAPTER_CONFIRM_SECONDS}"
+# --- the database backup must be one this publish can encrypt, before anything is exported (a dry run too) ---
+# The backup is committed, and pushed, only encrypted. A site whose site.json names no key to encrypt it to is refused
+# here: the other ways on would be a readable dump in the commit, or a publish with no backup, and neither is taken.
+[ -n "$SITE_BACKUP_RECIPIENTS" ] \
+  || fail 'site.json has no "backup" block, so the database backup can'"'"'t be encrypted; nothing was published. Make a key (age-keygen), keep it in your password manager, and add its public half: "backup": {"recipients": ["age1..."]}. The README has the steps.'
+# And age, which encrypts it, must be there: found on the PATH lib/site.sh cleaned, so never one in the site folder.
+# Refused now, not after the site was exported and replaced.
+command -v age > /dev/null 2>&1 || fail "age isn't installed; install it (brew install age) and publish again."
 # --- the compose project named in site.json must be this site folder's own (lib/site.sh: offprint_own_project) ---
 # Asked here, in this shell, so the answer is remembered for every docker compose call below (dc ps runs in a pipeline,
 # where it would be lost). Another folder's project: the publish fails, exit 2, and docker compose never runs. Docker
@@ -569,19 +580,77 @@ if ! mv site.new site; then
 fi
 remove site.old
 
-# --- database dump: only replaces backup/db.sql when it is whole ---
-mkdir -p backup || fail "Couldn't create the backup folder"
-dump="$VAR/db.sql.tmp"
-drc=0
-dc exec -T db sh -c 'exec mariadb-dump --skip-dump-date --skip-extended-insert --single-transaction -u"$MARIADB_USER" -p"$MARIADB_PASSWORD" "$MARIADB_DATABASE"' \
-  > "$dump" 2>>"$LOG" < /dev/null || drc=$?
-if [ "$drc" -ne 0 ] || [ ! -s "$dump" ] || [ "$(grep -v '^[[:space:]]*$' "$dump" | tail -n 1)" != "-- Dump completed" ]; then
+# --- the database backup: dumped, checked whole, encrypted, then sent; never in backup/ or a commit readable ---
+# Two steps, so that where the backup is sent can change without the making of it changing. backup_make leaves the
+# encrypted backup at $sealed (or nothing, when the one already committed is this same dump's); backup_send_NAME sends
+# it, NAME being site.json's backup.to. Only "repo" exists: the file goes into backup/, and so into the commit.
+dump="$VAR/db.sql.tmp"; sealed="$VAR/db.sql.age.tmp"
+BACKUP_NEW=1; BACKUP_NOTE=""; backup_bytes=0
+
+# backup_make: the dump is taken into var/ (which WordPress can read, and it is WordPress's own database, but cannot
+# write) and is whole only when mariadb-dump said so on its last line. It is then encrypted with age to every recipient
+# in site.json: public keys only, so a publish holds no secret of the backup's, and only the owner's private key, kept
+# off this Mac, opens it. age's output differs on every run, so encrypting an unchanged dump again would make a commit
+# of every publish: the committed backup is kept when var/backup.id (written by the last publish, where WordPress
+# can't write) names this same dump and these same recipients, and the file in backup/ is still the commit's. Anything
+# else (no note, a note that is a link, other recipients, a file changed or missing) and it is encrypted again. What
+# age wrote is taken only when age succeeded and it is an age file. The readable dump is removed on every path.
+backup_make() {
+  local drc=0 plain_id head_blob disk_blob r
+  rm -f "$dump" "$sealed"
+  dc exec -T db sh -c 'exec mariadb-dump --skip-dump-date --skip-extended-insert --single-transaction -u"$MARIADB_USER" -p"$MARIADB_PASSWORD" "$MARIADB_DATABASE"' \
+    > "$dump" 2>>"$LOG" < /dev/null || drc=$?
+  if [ "$drc" -ne 0 ] || [ ! -s "$dump" ] || [ "$(grep -v '^[[:space:]]*$' "$dump" | tail -n 1)" != "-- Dump completed" ]; then
+    rm -f "$dump"
+    fail "The database backup didn't finish, so nothing was committed; see var/publish.log"
+  fi
+  plain_id="$(git hash-object --no-filters -- "$dump" 2>>"$LOG" < /dev/null)" && [ -n "$plain_id" ] \
+    || { rm -f "$dump"; fail "The database backup couldn't be read back, so nothing was committed; see var/publish.log"; }
+  BACKUP_NOTE="$plain_id $SITE_BACKUP_RECIPIENTS"
+  if [ -f "$VAR/backup.id" ] && [ ! -L "$VAR/backup.id" ] && [ -f backup/db.sql.age ] && [ ! -L backup/db.sql.age ] \
+    && [ "$(head -n 1 "$VAR/backup.id" 2>/dev/null)" = "$BACKUP_NOTE" ]; then
+    head_blob="$(git rev-parse -q --verify 'HEAD:backup/db.sql.age' 2>/dev/null < /dev/null)" || head_blob=""
+    disk_blob="$(git hash-object --no-filters -- backup/db.sql.age 2>>"$LOG" < /dev/null)" || disk_blob=""
+    if [ -n "$head_blob" ] && [ "$head_blob" = "$disk_blob" ]; then BACKUP_NEW=0; fi
+  fi
+  if [ "$BACKUP_NEW" = 1 ]; then
+    set --
+    for r in $SITE_BACKUP_RECIPIENTS; do set -- "$@" -r "$r"; done
+    if ! age "$@" -o "$sealed" "$dump" >> "$LOG" 2>&1 < /dev/null \
+      || [ ! -s "$sealed" ] || [ -L "$sealed" ] || [ "$(head -c 21 "$sealed" 2>/dev/null)" != "age-encryption.org/v1" ]; then
+      rm -f "$dump" "$sealed"
+      fail "The database backup couldn't be encrypted, so nothing was committed; see var/publish.log"
+    fi
+  fi
   rm -f "$dump"
-  fail "The database backup didn't finish, so nothing was committed; see var/publish.log"
-fi
-[ -z "$(find "$dump" -size +99614720c 2>/dev/null)" ] || { rm -f "$dump"; fail "The database backup is over 95 MB and GitHub would refuse it"; }
-dump_bytes="$(wc -c < "$dump" | tr -d ' ')"
-mv "$dump" backup/db.sql || fail "Couldn't put the database backup in place"
+  if [ "$BACKUP_NEW" = 1 ]; then backup_bytes="$(wc -c < "$sealed" | tr -d ' ')"; else backup_bytes="$(wc -c < backup/db.sql.age | tr -d ' ')"; fi
+}
+
+# backup_send_repo: the encrypted backup into backup/, for the commit below. A readable backup/db.sql from before this
+# was encrypted leaves the folder, and so the commit; earlier commits still hold it, which only the owner can change,
+# so they are told, once: on the publish that removes it. The note of what was encrypted is written last, and replaces
+# whatever is at its name (never written through a link).
+backup_send_repo() {
+  mkdir -p backup || fail "Couldn't create the backup folder"
+  [ -z "$(find "${sealed}" -size +99614720c 2>/dev/null)" ] || { rm -f "$sealed"; fail "The database backup is over 95 MB and GitHub would refuse it"; }
+  if [ "$BACKUP_NEW" = 1 ]; then
+    rm -f backup/db.sql.age
+    mv "$sealed" backup/db.sql.age || { rm -f "$sealed"; fail "Couldn't put the database backup in place"; }
+  fi
+  if git rev-parse -q --verify 'HEAD:backup/db.sql' > /dev/null 2>&1 < /dev/null; then
+    warn "Earlier commits in this repository still hold the database unencrypted (backup/db.sql). A publish never rewrites history; whether to is yours to decide."
+  fi
+  rm -f backup/db.sql || fail "Couldn't remove the unencrypted backup/db.sql; nothing was committed"
+  rm -f "$VAR/backup.id"
+  printf '%s\n' "$BACKUP_NOTE" > "$VAR/backup.id" || fail "Couldn't note the database backup in var/backup.id; nothing was committed"
+}
+
+backup_make
+# Where it is sent. Another place adds an arm here and a backup_send_ function, and changes nothing above.
+case "$SITE_BACKUP_TO" in
+  repo) backup_send_repo ;;
+  *) rm -f "$sealed"; fail "site.json's backup.to is \"$(printf '%s' "$SITE_BACKUP_TO" | printable)\", and this Offprint can only send the backup to \"repo\"; nothing was committed." ;;
+esac
 
 # --- commit, from a private index ---
 # The commit is built in an index of this script's own (GIT_INDEX_FILE, in the repository's .git folder, which
@@ -658,9 +727,9 @@ if [ "$WRITES_ID" = 1 ]; then
 fi
 tree="$(pgit write-tree 2>>"$LOG" < /dev/null)" && [ -n "$tree" ] || fail "Git couldn't write the publish's tree; see var/publish.log"
 # And it must be in the tree exactly as written (a filter in git's own settings could change it on the way in).
-in_tree="$(git ls-tree -l "$tree" -- backup/db.sql 2>>"$LOG" < /dev/null | awk '$2 == "blob" { print $4; exit }')"
-[ "$in_tree" = "$dump_bytes" ] \
-  || fail "The database backup isn't in the commit as it was written (${in_tree:-missing} instead of $dump_bytes bytes: a filter or attribute in git's settings?); nothing was committed. See var/publish.log."
+in_tree="$(git ls-tree -l "$tree" -- backup/db.sql.age 2>>"$LOG" < /dev/null | awk '$2 == "blob" { print $4; exit }')"
+[ "$in_tree" = "$backup_bytes" ] \
+  || fail "The database backup isn't in the commit as it was written (${in_tree:-missing} instead of $backup_bytes bytes: a filter or attribute in git's settings?); nothing was committed. See var/publish.log."
 
 # The tree's own checks. A repository that appeared before git add is in it as a link (mode 160000), not as files, and
 # a plain git status would look inside it, running what its config names. GitHub refuses a file over 95 MB.

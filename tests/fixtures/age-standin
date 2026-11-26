@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# A stand-in for age, for the hermetic suites (tests/publish.test.sh, tests/adapter.test.sh, tests/agent.test.sh,
+# tests/backup.test.sh): each copies it to the front of the PATH as `age`. tests/backup-real.sh runs the real tool the
+# same two ways, so keep this true to what that shows. STUB_DIR is the case's folder of notes and switches.
+#
+#   age -r RECIPIENT [-r RECIPIENT] -o OUT IN    "encrypts": OUT is the age header line, a line naming the recipients,
+#                                                a line that differs on every run (the real tool's output does), then
+#                                                IN's bytes. Its arguments are noted in STUB_DIR/age.calls.
+#       age_fails: exits 1 and writes nothing.   age_empty: exits 0, OUT empty.   age_junk: exits 0, OUT is "junk".
+#   age -d -i - FILE                             "decrypts": reads the key from standard input (one line), and prints
+#                                                FILE from its fourth line on when the key is AGE-SECRET-KEY-1TEST, else
+#                                                fails as the real tool does. Only the key's length is noted.
+set -u
+: "${STUB_DIR:?the stand-in age needs STUB_DIR}"
+
+if [ "${1:-}" = -d ]; then
+  [ "${2:-}" = -i ] && [ "${3:-}" = - ] && [ $# -eq 4 ] || { echo "the stand-in age: unexpected decryption call: $*" >&2; exit 99; }
+  IFS= read -r key || true
+  echo "-d -i - $4 (a key of ${#key} characters on standard input)" >> "$STUB_DIR/age.calls"
+  [ "$(head -c 21 "$4" 2>/dev/null)" = "age-encryption.org/v1" ] || { echo "age: error: failed to read header: parsing age header: unexpected intro" >&2; exit 1; }
+  [ "$key" = AGE-SECRET-KEY-1TEST ] || { echo "age: error: no identity matched any of the recipients" >&2; exit 1; }
+  tail -n +4 "$4"
+  exit 0
+fi
+
+echo "$*" >> "$STUB_DIR/age.calls"
+recipients=""; out=""; in=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -r) recipients="$recipients $2"; shift 2 ;;
+    -o) out="$2"; shift 2 ;;
+    -*) echo "the stand-in age: unexpected option $1" >&2; exit 99 ;;
+    *) in="$1"; shift ;;
+  esac
+done
+[ -n "$recipients" ] && [ -n "$out" ] && [ -f "$in" ] || { echo "the stand-in age: unexpected call" >&2; exit 99; }
+[ ! -f "$STUB_DIR/age_fails" ] || { echo "age: error: a failure the test asked for" >&2; exit 1; }
+[ ! -f "$STUB_DIR/age_empty" ] || { : > "$out"; exit 0; }
+[ ! -f "$STUB_DIR/age_junk" ] || { echo junk > "$out"; exit 0; }
+count=$(( $(cat "$STUB_DIR/age.count" 2>/dev/null || echo 0) + 1 )); echo "$count" > "$STUB_DIR/age.count"
+{ echo "age-encryption.org/v1"; echo "-> stand-in$recipients"; echo "--- run $count"; cat "$in"; } > "$out"

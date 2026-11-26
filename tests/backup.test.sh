@@ -29,7 +29,8 @@ newcase() {
   cp "$SRC/tests/fixtures/age-standin" "$S/bin/age"; chmod +x "$S/bin/age"
   # docker, for restore: it notes each call. Not compose: the questions lib/site.sh asks about the project (nothing
   # there). compose: WordPress and the database are running (wp_down: nothing is); mariadb-dump prints current_dump
-  # (dump_fails: fails); "wp db query" lists a table (db_empty: none); "wp db reset" and "wp db import" end as
+  # (dump_fails: fails); the database's own count of its tables is 12 (db_empty: 0; count_fails: it fails;
+  # count_blank: it says nothing; count_odd: it says something that is no number); "wp db reset" and "wp db import" end as
   # reset_exit and import_exit say (0), the import keeping what it was given in imported.sql; "wp option get home"
   # prints home_before (options_fail: fails); "wp option update" succeeds.
   cat > "$S/bin/docker" <<'STUB'
@@ -39,7 +40,11 @@ echo "$*" >> "$STUB_DIR/docker.calls"
 case "$*" in
   *" ps "*) [ -f "$STUB_DIR/wp_down" ] || printf 'wordpress\ndb\n'; exit 0 ;;
   *mariadb-dump*) [ ! -f "$STUB_DIR/dump_fails" ] || exit 1; cat "$STUB_DIR/current_dump"; exit 0 ;;
-  *" wp db query "*) [ -f "$STUB_DIR/db_empty" ] || echo wp_posts; exit 0 ;;
+  *information_schema*)
+    [ ! -f "$STUB_DIR/count_fails" ] || { echo "ERROR 2002 (HY000): Can't connect" >&2; exit 1; }
+    [ ! -f "$STUB_DIR/count_blank" ] || exit 0
+    [ ! -f "$STUB_DIR/count_odd" ] || { echo "0 rows"; exit 0; }
+    if [ -f "$STUB_DIR/db_empty" ]; then echo 0; else echo 12; fi; exit 0 ;;
   *" wp db reset "*) exit "$(cat "$STUB_DIR/reset_exit" 2>/dev/null || echo 0)" ;;
   *" wp db import "*) cat > "$STUB_DIR/imported.sql"; exit "$(cat "$STUB_DIR/import_exit" 2>/dev/null || echo 0)" ;;
   *" wp option get home"*) [ ! -f "$STUB_DIR/options_fail" ] || exit 1; cat "$STUB_DIR/home_before" 2>/dev/null || echo "https://mysite.test"; exit 0 ;;
@@ -165,11 +170,11 @@ check "$t: exits 1" 1 "$code"; check "$t: says so" "problem: this site's last co
 restore() {
   out="$(cd "$tmp/case$n" && { printf '%s\n' "$key" 2> /dev/null || true; } | HOME="$tmp/case$n/home" PATH="$S/bin:$PATH" STUB_DIR="$S" OFFPRINT_SITE="$c" /bin/bash "$SRC/bin/offprint" backup restore "$@" 2>&1)"; code=$?
 }
-did() { grep -oE 'mariadb-dump|wp db query|wp db reset|wp db import|wp option get home|wp option update (home|siteurl)' "$S/docker.calls" 2>/dev/null | paste -sd'|' -; }
+did() { grep -oE 'mariadb-dump|information_schema|wp db reset|wp db import|wp option get home|wp option update (home|siteurl)' "$S/docker.calls" 2>/dev/null | paste -sd'|' -; }
 kept() { ls "$c/var/before-restore" 2>/dev/null | paste -sd' ' -; }
 nothing_replaced() { check "$1: the database was not touched" "" "$(did | grep -oE 'wp db reset|wp db import' | paste -sd'|' -)"; check "$1: no lock is left" no "$([ -e "$c/var/publish.lock" ] && echo yes || echo no)"; }
 Q62="age1$(printf 'q%.0s' $(seq 1 58))"
-all_steps='wp db query|mariadb-dump|wp db reset|wp db import|wp option get home|wp option update home|wp option update siteurl'
+all_steps='information_schema|mariadb-dump|wp db reset|wp db import|wp option get home|wp option update home|wp option update siteurl'
 
 newcase; restore --yes; t="restore, the committed backup"; kept1="$(kept)"
 check "$t: exits 0" 0 "$code"
@@ -231,13 +236,13 @@ check "$t: holding the database that was just replaced" 1 "$(grep -l RESTORED "$
 newcase; echo 1 > "$S/import_exit"; restore --yes; t="the import fails"; first="$(kept)"; before="$(cat "$c/var/before-restore/$first")"
 check "$t: exits 1" 1 "$code"
 check "$t: says the database is empty, and the exact way back" "problem: the import failed, and the database is now empty or part-filled. Put the last one back with: offprint backup restore --from var/before-restore/$first" "$out"
-check "$t: the options were not touched" "wp db query|mariadb-dump|wp db reset|wp db import" "$(did)"; check "$t: no lock is left" no "$([ -e "$c/var/publish.lock" ] && echo yes || echo no)"
+check "$t: the options were not touched" "information_schema|mariadb-dump|wp db reset|wp db import" "$(did)"; check "$t: no lock is left" no "$([ -e "$c/var/publish.lock" ] && echo yes || echo no)"
 rm "$S/import_exit"; touch "$S/db_empty"; : > "$S/docker.calls"; out="$(cd "$c" && printf '%s\n' "$KEY" | HOME="$tmp/case$n/home" PATH="$S/bin:$PATH" STUB_DIR="$S" /bin/bash "$SRC/bin/offprint" backup restore --from "var/before-restore/$first" --yes 2>&1)"; code=$?; t="then the way back, as it was printed, run in the site folder"
 check "$t: exits 0" 0 "$code"; check "$t: the kept copy is still there, unchanged" "$before" "$(cat "$c/var/before-restore/$first")"
-check "$t: no copy was made of the empty database" "$first" "$(kept)"; check "$t: mariadb-dump never ran" "wp db query|wp db reset|wp db import|wp option get home|wp option update home|wp option update siteurl" "$(did)"
+check "$t: no copy was made of the empty database" "$first" "$(kept)"; check "$t: mariadb-dump never ran" "information_schema|wp db reset|wp db import|wp option get home|wp option update home|wp option update siteurl" "$(did)"
 check "$t: says there was nothing to keep" "ok: example's database is now var/before-restore/$first's. The database was empty before, so nothing was kept." "$out"
 newcase; echo 1 > "$S/reset_exit"; restore --yes; t="the reset fails"
-check "$t: exits 1" 1 "$code"; check "$t: the import never ran" "wp db query|mariadb-dump|wp db reset" "$(did)"
+check "$t: exits 1" 1 "$code"; check "$t: the import never ran" "information_schema|mariadb-dump|wp db reset" "$(did)"
 case "$out" in "problem: the import failed, and the database is now empty or part-filled. Put the last one back with: offprint backup restore --from var/before-restore/"*) ok "$t: the same way back" ;; *) bad "$t: the same way back ($out)" ;; esac
 # The current database can't be kept: nothing is replaced.
 for how in dump_fails age_fails age_empty age_junk; do
@@ -246,15 +251,31 @@ for how in dump_fails age_fails age_empty age_junk; do
   check "$t: says so" "problem: the database as it is now couldn't be kept, so nothing was replaced." "$out"
   check "$t: nothing is left in var/before-restore" "" "$(kept)"
 done
+# Whether the database is empty is asked of the database itself, and only its plain 0 means empty: no answer, a failed
+# question or anything else is never taken for "nothing to keep" (the reset would follow with no way back).
+for how in count_fails count_blank count_odd; do
+  newcase; touch "$S/$how"; restore --yes; t="the database can't say how many tables it has ($how)"
+  check "$t: exits 1" 1 "$code"; nothing_replaced "$t"
+  check "$t: says so" "problem: the database as it is now couldn't be kept, so nothing was replaced." "$out"
+done
+check "the question is asked of the database's own container, not of WordPress" 1 "$(grep -c ' exec -T db .*information_schema' "$S/docker.calls")"
+# The kept copy is the dump byte for byte: nothing between mariadb-dump and age may change it (a NUL, a line with no
+# end, bytes that are no text).
+newcase; printf -- '-- MariaDB dump\nINSERT INTO t VALUES ("a\0b \377\376 c");\n-- Dump completed' > "$S/current_dump"; restore --yes; t="a dump with a NUL, bytes that are no text and no final line end"
+check "$t: exits 0" 0 "$code"
+check "$t: the kept copy holds it byte for byte" same "$(tail -n +4 "$c/var/before-restore/$(kept)" | cmp -s - "$S/current_dump" && echo same)"
 newcase; printf -- '-- MariaDB dump\nINSERT INTO t VALUES ("CUT");\n' > "$S/current_dump"; restore --yes; t="the dump of the database as it is doesn't finish"
 check "$t: exits 1" 1 "$code"; nothing_replaced "$t"; check "$t: says so" "problem: the database as it is now couldn't be kept, so nothing was replaced." "$out"
-# Only the five newest are kept, and only a restore that succeeded removes any.
+# A kept copy is never removed by a restore, however many there are: not after one that fails, not after one that
+# succeeds, not the one it restored from, and not a file of the owner's beside them.
 newcase; mkdir -p "$c/var/before-restore"; for d in 01 02 03 04 05 06; do dump_whole | sealed > "$c/var/before-restore/202601$d-000000.sql.age"; done
-echo 1 > "$S/import_exit"; restore --yes; t="six kept copies, then a restore that fails"
-check "$t: none was removed" 7 "$(ls "$c/var/before-restore" | wc -l | tr -d ' ')"
-rm "$S/import_exit"; sleep 1; restore --yes; t="then one that succeeds"
-check "$t: five are left" 5 "$(ls "$c/var/before-restore" | wc -l | tr -d ' ')"
-check "$t: the oldest went" "no no no" "$(for d in 01 02 03; do [ -e "$c/var/before-restore/202601$d-000000.sql.age" ] && echo yes || echo no; done | paste -sd' ' -)"
+echo mine > "$c/var/before-restore/2026-notes.sql.age"
+echo 1 > "$S/import_exit"; restore --yes; t="six kept copies and a file of the owner's, then a restore that fails"
+check "$t: none was removed" 8 "$(ls "$c/var/before-restore" | wc -l | tr -d ' ')"
+rm "$S/import_exit"; sleep 1; restore --from "$c/var/before-restore/20260101-000000.sql.age" --yes; t="then one that succeeds, from the oldest"
+check "$t: exits 0" 0 "$code"; check "$t: none was removed" 9 "$(ls "$c/var/before-restore" | wc -l | tr -d ' ')"
+check "$t: the one restored from is still there" yes "$([ -f "$c/var/before-restore/20260101-000000.sql.age" ] && echo yes)"
+check "$t: so is the owner's file" mine "$(cat "$c/var/before-restore/2026-notes.sql.age")"
 newcase; mkdir -p "$tmp/case$n/elsewhere"; ln -s "$tmp/case$n/elsewhere" "$c/var/before-restore"; restore --yes; t="var/before-restore is a link"
 check "$t: exits 1" 1 "$code"; nothing_replaced "$t"; check "$t: nothing was written through it" "" "$(ls "$tmp/case$n/elsewhere")"
 

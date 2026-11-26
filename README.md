@@ -344,16 +344,18 @@ it: a publish never rewrites history, so whether to remove it from the repositor
 **Restoring.** In the site folder, with its WordPress running, `offprint backup restore` replaces the local
 WordPress's whole database with the backup in the last commit. Its users and passwords become the backup's.
 
-1. It reads the backup through once, and goes no further unless it opens with your key and is a whole dump.
-2. It asks you to type the site's name (`--yes` skips the question), then for the private key, which is not shown.
+1. It asks you to type the site's name (`--yes` skips the question), then for the private key, which is not shown.
+2. It reads the backup through once, and goes no further unless it opens with your key and is a whole dump.
 3. The database as it is now is dumped and kept, encrypted to the keys in `site.json`, as a new file in
    `var/before-restore/`. If that can't be done, nothing is replaced.
 4. The database is replaced, and WordPress's own address is set to the site's local one.
 
 It ends with one `ok:` line, or one `problem:` line saying what to do. If the import itself fails, the database is
 left empty, and the line gives the exact command that puts the last one back:
-`offprint backup restore --from var/before-restore/DATE-TIME.sql.age`. Each restore keeps a new copy and never writes
-over an earlier one; after a restore that worked, the five newest stay. A restore never runs beside a publish. If the
+`offprint backup restore --from var/before-restore/DATE-TIME.sql.age`. Each restore keeps a new copy, and never
+writes over or removes an earlier one: delete old ones yourself when you no longer want them. (An empty database is
+not kept.) A restore never runs beside a publish; one that is killed outright can leave `var/publish.lock` behind,
+and a publish takes a lock over once it is 30 minutes old and its process is gone. If the
 site's publish agent is installed, a publish that WordPress asks for runs straight after one, on the restored
 database, and the command says so.
 

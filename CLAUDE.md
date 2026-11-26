@@ -77,8 +77,8 @@ tests/                        every suite (tests/php, tests/fixtures, *.test.sh,
 - A token is never written to a file, a log, `var/status.json`, a process's argument or test output, nor traced by
   `set -x`. It travels on a pipe or in the environment of the one process that needs it; output that could hold it goes
   through a filter that hides its value. The database backup's private key is such a token, and is not Offprint's to
-  keep at all: a publish encrypts to public keys only, and `offprint backup verify` holds the key the owner types in one
-  shell variable, for one pipe to `age`.
+  keep at all: a publish encrypts to public keys only, and `offprint backup verify` and `restore` hold the key the owner
+  types in one shell variable, for the pipes to `age` (two in a restore: the whole-first read, then the import).
 - The database dump is never committed, or left in `backup/`, readable: a publish refuses a site with no `backup` block
   or no `age`, and the readable dump in `var/` is removed on every exit.
 - A `TMPDIR` that is the site folder or inside it, or can't be entered, is refused before any temporary file is made
@@ -109,7 +109,7 @@ bash tests/hosts-block.test.sh              # 4
 bash tests/host.test.sh                     # 780
 bash tests/config.test.sh                   # 275
 bash tests/names.test.sh                    # 9
-bash tests/backup.test.sh                   # 256
+bash tests/backup.test.sh                   # 273
 bash tests/e2e.sh                           # 275; needs Docker; not in CI
 bash tests/compat-seo.sh wordpress-seo      # 6; needs Docker and the network; not in CI; never beside e2e.sh
 bash tests/backup-real.sh                   # 15; needs the real age (brew install age); not in CI

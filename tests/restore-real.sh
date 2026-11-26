@@ -11,6 +11,9 @@
 # removes the project, its volumes and the folder on every exit.
 #   bash tests/restore-real.sh
 set -uo pipefail
+# The site every command below acts on is the throwaway made here, and no other: an OFFPRINT_SITE inherited from the
+# shell that runs this would win over the folder each command runs in, and name a real site.
+unset OFFPRINT_SITE
 cd "$(dirname "$0")/.."
 SRC="$PWD"
 NAME=offprint-restore-real
@@ -30,7 +33,7 @@ contains() { case "$3" in *"$2"*) ok "$1" ;; *) bad "$1 (no '$2' in '$3')" ;; es
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/offprint-restore-real.XXXXXX")"; work="$(cd "$work" && pwd -P)"
 site="$work/$NAME"
-op() { ( cd "$site" && /bin/bash "$SRC/bin/offprint" "$@" ); }
+op() { ( cd "$site" && OFFPRINT_SITE="$site" /bin/bash "$SRC/bin/offprint" "$@" ); }
 cleanup() {
   if [ -f "$site/site.json" ]; then
     op compose exec -T wordpress chmod -R a+rwX /var/www/html/wp-content > /dev/null 2>&1
@@ -44,17 +47,19 @@ identity="$(age-keygen 2> /dev/null | grep '^AGE-SECRET-KEY-')"
 recipient="$(printf '%s\n' "$identity" | age-keygen -y)"
 
 # --- a real site folder, and its WordPress ---
-( cd "$work" && /bin/bash "$SRC/bin/offprint" new "$NAME" --public-url https://www.example.com ) > "$work/new.out" 2>&1 \
+( cd "$work" && env -u OFFPRINT_SITE /bin/bash "$SRC/bin/offprint" new "$NAME" --public-url https://www.example.com ) > "$work/new.out" 2>&1 \
   || { cat "$work/new.out"; echo "offprint new failed; nothing was started."; exit 1; }
 sed '$d' "$site/site.json" | sed '$s/$/,/' > "$site/site.json.new"
 printf '  "backup": {"recipients": ["%s"]}\n}\n' "$recipient" >> "$site/site.json.new"; mv "$site/site.json.new" "$site/site.json"
 git -C "$site" commit -q -am "a backup key"
 echo "Making the throwaway WordPress (a minute or two)..."
-( cd "$site" && WP_ADMIN_USER=real-admin WP_ADMIN_EMAIL=admin@example.com \
+( cd "$site" && OFFPRINT_SITE="$site" WP_ADMIN_USER=real-admin WP_ADMIN_EMAIL=admin@example.com \
   WP_ADMIN_PASSWORD="$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24)" /bin/bash "$SRC/bin/offprint" setup-wp ) > "$work/setup.out" 2>&1 \
   || { tail -20 "$work/setup.out"; echo "offprint setup-wp failed."; exit 1; }
 wp() { op wp "$@" < /dev/null; }
 titles() { wp post list --post_type=post --post_status=publish --field=post_title 2> /dev/null | sort | paste -sd'|' -; }
+# Before anything is changed: the site the commands act on must be the throwaway, by its compose project.
+[ "$(op compose config 2> /dev/null | sed -n 's/^name: //p')" = "$NAME" ] || { echo "The commands here are not acting on the throwaway site; stopping before anything is changed."; exit 1; }
 post="$(wp post create --post_title=Before --post_status=publish --post_author=1 --porcelain)"
 
 # --- a publish makes the encrypted backup; verify opens it ---

@@ -279,6 +279,42 @@ has "$t: (no new privileges)" "NoNewPrivileges=yes" "$script"
 has "$t: the firewall lines are printed, never run" 'echo "  ufw default deny incoming"' "$script"
 check "$t: no ufw, iptables or nft is run by it" "" "$(printf '%s\n' "$script" | grep -E '^[[:space:]]*(ufw|iptables|nft) ')"
 lacks "$t: no sudo is in it" "sudo " "$script"
+# The unit's filter (@system-service) kills a program at the first call outside it, and node's engine asks for a
+# memory protection key as it starts (pkey_alloc), which that list leaves out: on the first real machine the store
+# died at every start (signal SYS), five seconds apart. The three pkey calls touch the program's own memory alone.
+has "$t: the unit lets node ask for a memory protection key (it dies at once without)" "SystemCallFilter=pkey_alloc pkey_mprotect pkey_free" "$script"
+# And the set-up called that store "running": a unit that dies at once is active again each time systemd starts it
+# again, and the one look came two seconds after the start. So the look is at the process: the same one, still there
+# after longer than systemd waits before starting it again. Run here as printed, with a stand-in systemctl and sleep.
+( cd "$tmp/case$n" && mkdir -p su && sed -n '/^start_store() {$/,/^}$/p' setup-printed.sh > su/start.sh
+  printf '%s\n' '#!/bin/bash' 'echo "$*" >> "$SU/systemctl.calls"' 'case "$*" in' \
+    '  *"-p MainPID"*) k="$(cat "$SU/k" 2> /dev/null || echo 0)"; k=$((k + 1)); echo "$k" > "$SU/k"; sed -n "${k}p" "$SU/pids" ;;' \
+    '  is-active*) [ -f "$SU/active" ] ;;' 'esac' > su/systemctl
+  printf '%s\n' '#!/bin/bash' 'echo "$1" >> "$SU/sleep.calls"' > su/sleep
+  chmod 755 su/systemctl su/sleep )
+start_store() {  # start_store PID_AT_FIRST PID_LATER active|inactive
+  rm -f "$tmp/case$n/su/k" "$tmp/case$n/su/active" "$tmp/case$n/su/systemctl.calls" "$tmp/case$n/su/sleep.calls"
+  printf '%s\n' "$1" "$2" > "$tmp/case$n/su/pids"; [ "$3" != active ] || : > "$tmp/case$n/su/active"
+  out="$(cd "$tmp/case$n/su" && SU="$tmp/case$n/su" PATH="$tmp/case$n/su:/usr/bin:/bin" /bin/bash -c 'set -eu; PH_SITE=example PH_PATH=/_pigeonhole PH_LISTEN=10.0.0.5:8788; die() { echo "pigeonhole set-up: $1" >&2; exit 1; }; . ./start.sh; start_store' 2>&1)"; code=$?
+}
+check "$t: the start is a part of its own (start_store)" "start_store() {" "$(head -n 1 "$tmp/case$n/su/start.sh")"
+start_store 4001 4001 active
+check "$t, a store that stays up: exits 0" 0 "$code"
+has "$t, a store that stays up: called running" "The store is running: pigeonhole@example, taking /_pigeonhole on 10.0.0.5:8788." "$out"
+has "$t, a store that stays up: it was enabled and started" "enable pigeonhole@example.service" "$(cat "$tmp/case$n/su/systemctl.calls")"
+wait_s="$(tail -n 1 "$tmp/case$n/su/sleep.calls")"; again_s="$(printf '%s\n' "$script" | sed -n 's/^RestartSec=\([0-9][0-9]*\)$/\1/p')"
+if [ -n "$again_s" ] && [ "${wait_s:-0}" -gt "$again_s" ]; then ok "$t: the second look comes later than systemd starts a dead store again (${wait_s}s, ${again_s}s)"; else bad "$t: the second look ('$wait_s's) is no later than RestartSec ('$again_s's)"; fi
+start_store 4001 4002 active
+check "$t, a store started again meanwhile (it died): exits 1" 1 "$code"
+has "$t, a store started again meanwhile: says so" "pigeonhole set-up: the store didn't stay up" "$out"
+has "$t, a store started again meanwhile: says where the reason is" "journalctl -u pigeonhole@example" "$out"
+lacks "$t, a store started again meanwhile: never called running" "The store is running" "$out"
+start_store 0 0 active
+check "$t, a store with no process: exits 1" 1 "$code"
+lacks "$t, a store with no process: never called running" "The store is running" "$out"
+start_store 4001 4001 inactive
+check "$t, a store systemd calls stopped: exits 1" 1 "$code"
+lacks "$t, a store systemd calls stopped: never called running" "The store is running" "$out"
 check "$t: ssh never ran, nor curl" "0 0" "$(calls "$S/ssh.calls" .) $(calls "$S/curl.calls" .)"
 private "$t"
 for a in "store.example.com" "10.0.0" "10.0.0.02" "10.0.0.2;id" '$(id)' "10.0.0.2 x" "" "FD00::2"; do

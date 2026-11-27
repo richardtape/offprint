@@ -129,6 +129,10 @@ ProtectHostname=yes
 ProtectProc=invisible
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
+# node's engine asks for a memory protection key as it starts, and that list leaves the call out: a program is
+# killed at the first call outside the filter, so without this line the store dies at every start (signal SYS).
+# The three touch its own memory alone.
+SystemCallFilter=pkey_alloc pkey_mprotect pkey_free
 # The internet's two families only (its one listening socket); who it may speak with is the instance's own file.
 RestrictAddressFamilies=AF_INET AF_INET6
 MemoryMax=256M
@@ -147,14 +151,26 @@ IPAddressDeny=any
 IPAddressAllow=$PH_WEB
 NET
 
-if [ -d /run/systemd/system ]; then
+# start_store: the unit enabled and started, and called running only once it has stayed up. A store that dies as it
+# starts is "active" again each time systemd starts it again (RestartSec, above), so asking systemd once says
+# nothing: the look is at the process, which must be there, and the same one after longer than that wait.
+start_store() {
+  local unit="pigeonhole@$PH_SITE.service" pid now
   systemctl daemon-reload
-  systemctl enable "pigeonhole@$PH_SITE.service"
-  systemctl restart "pigeonhole@$PH_SITE.service"
+  systemctl enable "$unit"
+  systemctl restart "$unit"
   sleep 2
-  systemctl is-active --quiet "pigeonhole@$PH_SITE.service" \
-    || die "the store didn't stay up: journalctl -u pigeonhole@$PH_SITE says why (is $PH_LISTEN this machine's own address?)."
+  pid="$(systemctl show "$unit" -p MainPID --value)" || pid=0
+  sleep 8
+  now="$(systemctl show "$unit" -p MainPID --value)" || now=0
+  if ! systemctl is-active --quiet "$unit" || [ -z "$pid" ] || [ "$pid" = 0 ] || [ "$now" != "$pid" ]; then
+    die "the store didn't stay up: systemd starts it and it stops, again and again. journalctl -u pigeonhole@$PH_SITE -n 20 says why (is $PH_LISTEN this machine's own address? A line with status=31/SYS means the unit's SystemCallFilter refused a call node made: journalctl -k | grep type=1326 names it). To stop systemd trying: systemctl stop pigeonhole@$PH_SITE."
+  fi
   echo "The store is running: pigeonhole@$PH_SITE, taking $PH_PATH on $PH_LISTEN."
+}
+
+if [ -d /run/systemd/system ]; then
+  start_store
 else
   echo "systemd isn't running here, so the unit is written but nothing was started."
 fi

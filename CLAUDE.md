@@ -222,7 +222,7 @@ bash tests/names.test.sh                    # 9
 bash tests/backup.test.sh                   # 273
 bash tests/collect.test.sh                  # 366
 bash tests/fetch.test.sh                    # 377
-bash tests/pigeonhole.test.sh               # 407
+bash tests/pigeonhole.test.sh               # 421
 bash tests/e2e.sh                           # 456; needs Docker; not in CI
 bash tests/compat-seo.sh wordpress-seo      # 6; needs Docker and the network; not in CI; never beside e2e.sh
 bash tests/backup-real.sh                   # 15; needs the real age (brew install age); not in CI

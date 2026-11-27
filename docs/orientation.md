@@ -150,8 +150,10 @@ where it waits in the moderation queue; an approved comment shows at the next pu
 collect` and `wp offprint import-submission`; and the page's side (stage 3), which is the form in export mode
 (`plugin/offprint/src/Pigeonhole.php`), the two scripts a page loads (sources in `pigeonhole/browser/`, built into
 `plugin/offprint/`), `bin/check-site-pigeonhole.php`, and `ADAPTER_PIGEONHOLE`, by which an adapter says its host
-forwards the path. Not built: the store, the fetch, the keys' set-up, and the admin bar's part. Until they are, a
-comment form would post to nothing, which is why no adapter of the tool's sets `ADAPTER_PIGEONHOLE`. Decided: fetched on a schedule but opened only when the owner asks; held
+forwards the path; and the store (stage 4), `pigeonhole/server/store.js`, which takes what the web server forwards
+and keeps it. Not built: setting the store up on a server, the fetch, the keys' set-up, and the admin bar's part.
+Until they are, a comment form would post to nothing, which is why no adapter of the tool's sets
+`ADAPTER_PIGEONHOLE`. The store has only ever run on this Mac, in its tests. Decided: fetched on a schedule but opened only when the owner asks; held
 always; no email about a comment; avatars off; moderating asks for no publish.
 
 Also deferred until something needs it: a WordPress filter that lets a site add its own starting addresses.
@@ -205,6 +207,9 @@ Check each is still true before relying on it or fixing it.
 - The search for the local host name in `bin/check-site` reads bytes, so it does not see one in a feed or sitemap
   written in UTF-16 (the address check reads those with the XML parser; a page or stylesheet in UTF-16 is refused).
   The exporter's own refusal of the local host name reads bytes too.
+- Pigeonhole: the store gives a request four seconds and reads four at once from one sender, but many senders each
+  trickling a body can still fill its 200 places for a while. The web server must hand it a request only once it has
+  the whole body (for Caddy, `request_buffers` on the route): to be done when the server's set-up is written.
 - Pigeonhole: the script that encrypts a comment is 135 KB (about 52 KB compressed): the age library brings parts a
   comment never uses. It loads only when a visitor first touches the form. What it says to a visitor is in English
   only, and written into the script.

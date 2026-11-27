@@ -324,7 +324,13 @@ A comment form is only any use on a host that forwards `path` to the site's pige
 site with the block unless its adapter says its host does (`ADAPTER_PIGEONHOLE=1`: see
 [A site's own adapter](#a-sites-own-adapter)). Neither built-in adapter does.
 
-Not built: the store, fetching from it, making the keys, and the admin bar's count.
+The store itself is built too (`pigeonhole/server/store.js`: one small node program, no dependencies), and has
+only run in its tests. It takes a `POST` to the one path and nothing else. It refuses anything that is not exactly
+the size a submission has, does not start as an age file does, or carries no proof of work; it lets one sender (an
+IPv4 address, or a /64 of IPv6) send 10 an hour and everyone 300; and it keeps each submission once, whole or not at
+all, in a file named after its hash. It cannot list or give back what it holds, and it writes down no address.
+
+Not built: setting the store up on a server, fetching from it, making the keys, and the admin bar's count.
 
 ## Publishing to Cloudflare Workers
 
@@ -457,6 +463,7 @@ it. Its last line is the table's row. It needs Docker and the network (the plugi
 | `offprint backup verify` and `restore` | `bash tests/backup.test.sh` | no (stand-in `age` and `docker`) | yes |
 | `offprint collect` | `bash tests/collect.test.sh` | no (stand-in `age`, `docker` and `security`) | yes |
 | The page's scripts (comments) | `node --test tests/pigeonhole-browser.test.js` | no | yes |
+| The store (comments) | `node --test tests/pigeonhole-server.test.js` | no | yes |
 | Names that must not be in the tool | `bash tests/names.test.sh` | no | yes |
 | End to end | `bash tests/e2e.sh` | yes | no |
 | A plugin that replaces WordPress's sitemaps | `bash tests/compat-seo.sh SLUG` | yes, and the network | no |
@@ -466,7 +473,7 @@ it. Its last line is the table's row. It needs Docker and the network (the plugi
 | The page's scripts, built again and opened with the real `age` | `bash tests/pigeonhole-real.sh` | no (but `age`, `npm` and the network) | no |
 | A running site | `bash tests/site.test.sh SITE_DIR` | yes (a set-up site) | no |
 
-The first fifteen need only bash, git, PHP, Perl and Node. The suites that publish use a stand-in `age`
+The first sixteen need only bash, git, PHP, Perl and Node. The suites that publish use a stand-in `age`
 (`tests/fixtures/age-standin`); `tests/backup-real.sh` runs the real one the same ways, and is run on the Mac before a
 change to the backup is merged. `tests/restore-real.sh` makes a real, throwaway site folder (`offprint new`,
 `offprint setup-wp`, a publish with `--no-push`) in the compose project `offprint-restore-real`, restores into it

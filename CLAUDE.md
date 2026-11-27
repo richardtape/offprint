@@ -54,6 +54,9 @@ plugin/                       the WordPress plugin: offprint.php, offprint/{admi
                               and committed (never edited by hand)
 pigeonhole/browser/           the sources of those two scripts (src/), the two packages they are built with, pinned
                               (package.json, package-lock.json), and build.sh, which writes them into plugin/offprint/
+pigeonhole/server/store.js    a site's pigeonhole, for a machine of the owner's that only the site's web server reaches:
+                              takes a POST to one path, checks it (exact size, an age file's start, the proof of
+                              work, the limits), and keeps the ciphertext under its hash; node, no dependencies
 templates/                    compose.yaml, Caddyfile, wordpress/Dockerfile, site.gitignore (for a site's repo)
 docs/how-it-fits-together.md  the diagrams of what lives where and of a publish (README.md embeds the second), and a
                               publish step by step
@@ -64,6 +67,7 @@ docs/security.md              the table of what could go wrong and what stops it
 docs/orientation.md           the picture for an agent new to the project: read it before a first change
 tests/                        every suite (tests/php, tests/fixtures, *.test.sh, *.test.js, e2e.sh, compat-seo.sh);
                               tests/collect-real.sh runs offprint collect with the real age (not in CI);
+                              tests/pigeonhole-server.test.js tests the store;
                               tests/pigeonhole-browser.test.js tests the page's scripts, and holds the built ones'
                               hashes; tests/pigeonhole-real.sh builds them again from a clean install and opens what
                               they encrypt with the real age (not in CI);
@@ -111,6 +115,10 @@ tests/                        every suite (tests/php, tests/fixtures, *.test.sh,
   every link to the site, and the checks refuse the local host name anywhere: either would fail every publish once
   the comment was approved). What WordPress answers to an import is data: one line of three shapes, or no answer.
   One submission that can't be taken never holds up those behind it.
+- The store (`pigeonhole/server/store.js`) knows nothing of a submission but its size, when it came and the address
+  the web server named: it has one route, cannot list or give back what it holds, never starts a connection, and
+  writes down no address, name or body. It has no dependency but node. Keep it so. A submission is kept whole or
+  not at all, and never called kept when it wasn't; a request the web server didn't name an address for is refused.
 - The two scripts a page with a comment form loads are built from `pigeonhole/browser/` and committed in
   `plugin/offprint/`; a site is published with the committed ones, and `bin/check-site` refuses an export whose copies
   differ. Never edit them by hand. After any change to `pigeonhole/browser/`: run `build.sh` there, read what changed,
@@ -133,9 +141,10 @@ tests/                        every suite (tests/php, tests/fixtures, *.test.sh,
 - Built: the adapters `none` and `cloudflare-workers` (`offprint adapter setup` and `doctor` set it up and check it);
   `offprint new` (a site folder only: it runs no set-up); the encrypted database backup, `offprint backup verify` and
   `offprint backup restore`. Built in part: Pigeonhole, comments on a static site. What is built is the Mac's side
-  (`site.json`'s `pigeonhole` block, `offprint collect`, the import) and the page's side (the form on an exported
-  page, the two scripts that encrypt and post a comment, the checks of both); what is not is everything between (the
-  server that stores submissions, fetching from it, making the keys), so no site can take a comment yet. A publish
+  (`site.json`'s `pigeonhole` block, `offprint collect`, the import), the page's side (the form on an exported
+  page, the two scripts that encrypt and post a comment, the checks of both) and the store (`pigeonhole/server/`);
+  what is not is what joins them (setting the store up on a server, fetching from it, making the keys), so no site
+  can take a comment yet. A publish
   refuses a site with a `pigeonhole` block unless its adapter sets `ADAPTER_PIGEONHOLE=1`, and no adapter of the
   tool's does. Not built: any place to send the backup but the site's repository; the `ssh`
   adapter; a top-level `setup`, `doctor` or `upgrade`. Do not describe those as if they were.
@@ -144,7 +153,7 @@ tests/                        every suite (tests/php, tests/fixtures, *.test.sh,
 
 ```sh
 composer install && vendor/bin/phpunit      # 454 tests
-node --test tests/*.test.js                 # 31 tests
+node --test tests/*.test.js                 # 63 tests
 bash tests/check-site.test.sh               # 504
 bash tests/new.test.sh                      # 381
 bash tests/publish.test.sh                  # 1439 (slow: several minutes)

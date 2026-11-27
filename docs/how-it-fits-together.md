@@ -104,6 +104,32 @@ node that `offprint adapter setup` put there and the token it keeps in the login
 site for its `offprint.json` until it names this publish, and only then says Live. With no host set up (the adapter
 `none`) the publish ends at the push, and says Saved. An adapter for a server you run over SSH is not built.
 
+Step by step:
+
+1. You publish in wp-admin, or press Publish Site. The plugin writes a request into `var/inbox`, and the launchd agent
+   (once `offprint install-agent` has installed it) moves it out and reads it as data. The agent runs
+   `offprint publish`.
+2. WordPress (in Docker, on this Mac) is told to export itself; the exporter runs in the container and writes
+   `var/export`. It starts from the home page, the feed, `robots.txt` and the sitemaps (WordPress's own, or those
+   `robots.txt` names: see [Plugins that replace WordPress's sitemaps](reference.md#plugins-that-replace-wordpresss-sitemaps)), and
+   follows every link. The export is copied to a private folder, `site.new`: WordPress can still write `var/export`, so
+   only the private copy is checked and published.
+3. `bin/check-site` checks the copy: no local address, no admin, login, XML-RPC or REST links, no symlinks, no git
+   files, none of the files the publish or the host writes at the root (for Cloudflare: `offprint.json`, `_headers`
+   and `_redirects`), nor one the host would read as its own (`.assetsignore`, `_worker.js`), and the host's limits.
+   If it refuses, nothing is published and the admin bar says why.
+4. `site/` is replaced by the copy. The database is dumped, and the dump is encrypted with `age` to the public keys
+   in `site.json`'s `backup` block, as `backup/db.sql.age`: no readable dump is committed. (See
+   [The database backup](reference.md#the-database-backup).)
+5. One commit is made of `site/`, `wp-content/` and `backup/`, with `git commit-tree`, so no commit hooks run. It is
+   refused unless the plugin in it is exactly this Offprint's own.
+6. The commit is pushed to `origin`. Then the site's host adapter makes it live: `cloudflare-workers` uploads exactly
+   the committed `site/` to the Worker, from this Mac, with wrangler. The publish asks the live site for its
+   `offprint.json` until it names this publish (for Cloudflare, for 60 seconds at most), and then says Live. With no
+   host set up (the adapter `none`), the publish ends at the push: "Saved".
+
+Progress is in `var/status.json` (shown in the WordPress admin bar) and `var/publish.log`.
+
 ## What `host-setup` adds on the Mac
 
 ```mermaid

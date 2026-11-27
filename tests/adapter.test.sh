@@ -3489,7 +3489,7 @@ no_leak "$t"
 # of what they printed (planted.stdin, planted.stdout), then run the real one. With them first on the PATH (an absolute
 # entry; or "." or an empty entry, run from that folder), set-up, doctor and a publish never run os/darwin/secret
 # through either, and none of the token goes through them. (Other scripts may still run through the planted bash, the
-# test's own stand-ins and bin/check-site among them: every other command comes from the PATH as given. See README.md.)
+# test's own stand-ins and bin/check-site among them: every other command comes from the PATH as given. See docs/security.md.)
 # Planted in wp-content/, lib/site.sh leaves each of those entries out before anything runs (the first layer): so those
 # three kinds now show that. Planted in a folder outside the site, an absolute entry is kept by every layer, and set-up,
 # doctor and a publish meet the planted bash and env: so that kind shows /bin/bash itself (the second layer). For "."

@@ -35,7 +35,7 @@
 # choosing that. PATH is never left empty (bash would then search the folder it runs in): with nothing
 # left, it is the system's own, OFFPRINT_SYSTEM_PATH, said in one line. PATH is exported, so the tool's own scripts a
 # command runs (each as /bin/bash SCRIPT, never by a bash found on the PATH) inherit it clean and say nothing again. An
-# absolute entry outside every site folder that can be entered is the owner's own to keep clean (README.md, the security
+# absolute entry outside every site folder that can be entered is the owner's own to keep clean (docs/security.md, the
 # table): whatever is there runs, as it would for any command. TMPDIR is held the same way (offprint_check_tmpdir).
 
 # An inherited allexport (SHELLOPTS=allexport in the environment turns it on in every bash) is turned off here, for the

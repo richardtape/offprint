@@ -1,6 +1,6 @@
 # Orientation
 
-For a coding agent new to Offprint, before its first change. `README.md` is for people who use the tool, and
+For a coding agent new to Offprint, before its first change. `README.md` and the rest of `docs/` are for people who use the tool, and
 `CLAUDE.md` is the rules you work under. This is the picture that makes those rules make sense: what the tool is,
 how its parts fit, where a new feature goes, what is decided but not built, and what has gone wrong before.
 
@@ -96,9 +96,9 @@ side wherever you can.
 
 | You are adding | It goes in | Remember |
 |---|---|---|
-| A command | `bin/NAME`, wired into `bin/offprint` and its help | Start `#!/bin/bash`, source `lib/site.sh` first; add it to the entry-point list in `tests/names.test.sh`; the README's help block must match `offprint help` |
+| A command | `bin/NAME`, wired into `bin/offprint` and its help | Start `#!/bin/bash`, source `lib/site.sh` first; add it to the entry-point list in `tests/names.test.sh`; the help block in `docs/reference.md` must match `offprint help` |
 | A host | `adapters/NAME/` | `lib/adapter.sh`'s header is the contract: which functions and variables an adapter may define, and what a publish does around them. `bin/` and `lib/` must never name a host |
-| Something the export should find or skip | `plugin/offprint/src/` | Any change under `plugin/` means every existing site must replace its copy before it can publish again (the publish says how). Say so in the README when it matters |
+| Something the export should find or skip | `plugin/offprint/src/` | Any change under `plugin/` means every existing site must replace its copy before it can publish again (the publish says how). Say so in `docs/reference.md` when it matters |
 | A new refusal | `bin/check-site` or `bin/publish` | A comment saying what it stops, a test that fails without it, and a message that says what to do |
 | Anything that changes the Mac | `os/darwin/` | The tool never runs `sudo`. It prints the line and the owner runs it |
 | A field in `site.json` | `lib/config.php` | It is the only parser; nothing is ever sourced or `eval`ed from it |
@@ -161,9 +161,9 @@ Check each is still true before relying on it or fixing it.
 - `bin/publish` says "GitHub" whatever host `origin` is on, and "Couldn't reach GitHub" when there is no `origin`.
 - Two `offprint new` runs before the first site's host set-up pick the same address and ports. Host set-up
   refuses the clash; `new` says so.
-- Never run for real: `offprint new`'s address prompt, the README's `gh repo create` line, and a publish started
+- Never run for real: `offprint new`'s address prompt, `docs/getting-started.md`'s `gh repo create` line, and a publish started
   by the agent while the login Keychain is locked.
-- Tried with Docker Desktop only. One SEO plugin measured (`tests/compat-seo.sh`; the README has the table).
+- Tried with Docker Desktop only. One SEO plugin measured (`tests/compat-seo.sh`; `docs/reference.md` has the table).
 - `wp-content/` (uploads, themes, plugins) is committed unencrypted; only the database backup is encrypted.
 - `offprint backup restore` replaces the database and nothing else: it does not rewrite addresses inside content (it
   prints the command to consider), and `wp-content/` comes back from git, not from it. Its `--from` a readable dump

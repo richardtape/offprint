@@ -1,6 +1,7 @@
 # Offprint
 
-For coding agents working in this repo. `README.md` says what Offprint is and what is built; this says how to work on it.
+For coding agents working in this repo. `README.md` says what Offprint is and what is built (briefly: the steps, the
+reference and the security table are in `docs/`); this says how to work on it.
 
 New to the project? Read `docs/orientation.md` before your first change: what the tool is for, how a publish and the
 export work, where a new feature goes, what is decided but not built, and what has gone wrong before. This file is
@@ -41,7 +42,12 @@ os/darwin/install-agent       the user's launchd agent that runs bin/publish-age
 os/darwin/secret              a named secret of a site's in the login Keychain (get, set, delete)
 plugin/                       the WordPress plugin: offprint.php, offprint/{admin-bar.css,admin-bar.js,src/*.php}
 templates/                    compose.yaml, Caddyfile, wordpress/Dockerfile, site.gitignore (for a site's repo)
-docs/how-it-fits-together.md  the diagrams of what lives where and of a publish (README.md embeds the first two)
+docs/how-it-fits-together.md  the diagrams of what lives where and of a publish (README.md embeds the second), and a
+                              publish step by step
+docs/getting-started.md       for someone new to the tool: what they need, then one step per command to a first publish
+docs/reference.md             site.json, the backup and restore, every command (its help block must match `offprint
+                              help`), the hosts, the privileged step, sitemap plugins, the tests
+docs/security.md              the table of what could go wrong and what stops it
 docs/orientation.md           the picture for an agent new to the project: read it before a first change
 tests/                        every suite (tests/php, tests/fixtures, *.test.sh, *.test.js, e2e.sh, compat-seo.sh);
                               tests/fixtures/adapters/workflow is an adapter outside the tool, for tests/publish.test.sh;
@@ -64,8 +70,8 @@ tests/                        every suite (tests/php, tests/fixtures, *.test.sh,
   relative entry, every entry in the site folder, every `~` entry when `HOME` isn't an absolute path or has a colon,
   and every entry that leads to a folder with a colon in its name (each saying so), and every entry that can't be
   entered (silently; its header), and keeps the rest, and `TMPDIR`, as the folders they are on disk then (`cd -P`), not
-  as their text. The rest of the PATH (absolute entries outside the site folder) is the owner's to keep clean (README,
-  security table).
+  as their text. The rest of the PATH (absolute entries outside the site folder) is the owner's to keep clean
+  (`docs/security.md`).
   Every defence in `bin/publish` and `bin/check-site` has a test and a comment saying why. Do not weaken, skip or make
   one optional; if a change needs that, stop and ask.
 - The exporter, the plugin and the checks know no theme, block or plugin by name. `bin/publish`, `bin/check-site`,

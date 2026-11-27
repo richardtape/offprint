@@ -5,7 +5,7 @@
 # while the project exists. Unlike e2e.sh it needs the network: the plugin comes from wordpress.org.
 #   bash tests/compat-seo.sh PLUGIN_SLUG          (the plugin's slug on wordpress.org: wordpress-seo, say)
 # It makes a few posts, two pages (one that nothing links to), a category and a tag; installs and activates the
-# plugin; exports; and checks the export, one ok or FAIL line each. Its last line is the README's table row:
+# plugin; exports; and checks the export, one ok or FAIL line each. Its last line is the row of docs/reference.md's table:
 #   SLUG VERSION: N ok, M FAIL
 # It exits 0 only when M is 0.
 set -uo pipefail

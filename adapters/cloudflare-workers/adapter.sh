@@ -158,7 +158,7 @@ adapter_doctor() {
 # it, nor by a link leading there, nor read through a link (the file naming node). Each rule asks the disk, with every
 # link followed (lib/site.sh: offprint_inside_site), and runs nothing. (os/darwin/secret, which holds the token, is run
 # with /bin/bash, by lib/adapter.sh, and itself runs /usr/bin/security. Other commands, git, php, rm and the rest, come
-# from the PATH the publish is given: see README.md on keeping folders WordPress can write off it.)
+# from the PATH the publish is given: see docs/security.md on keeping folders WordPress can write off it.)
 #
 # adapter_cf_home: sets cf_home, the Offprint folder (OFFPRINT_HOME, else HOME/Library/Application Support/Offprint),
 # cf_dir (its cloudflare-workers folder), cf_dest (wrangler-4.166.0 there), cf_entry (wrangler's entry script in it,

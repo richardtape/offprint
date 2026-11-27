@@ -1,7 +1,7 @@
 #!/bin/bash
 # offprint new NAME [--public-url URL]: makes a new site folder, ./NAME, in the folder this runs in: a git repository on
 # main holding site.json and .gitignore (templates/site.gitignore), committed as "A new site"; then says what it picked
-# and the commands that are left (README.md, "Try it"). It changes nothing else: no other site is read, nothing on the
+# and the commands that are left (docs/getting-started.md). It changes nothing else: no other site is read, nothing on the
 # Mac is set up, nothing is written outside the folder it runs in.
 #
 # What it writes, and how:

@@ -5,7 +5,8 @@
  * Usage: php lib/config.php SITE_DIR
  *
  * Exit 0: the ten SITE_* lines on stdout (the keys lib/site.sh reads), then, for a site.json with a
- * "backup" block, SITE_BACKUP_RECIPIENTS and SITE_BACKUP_TO, then ADAPTER_NAME and one
+ * "backup" block, SITE_BACKUP_RECIPIENTS and SITE_BACKUP_TO, then, for one with a "pigeonhole" block,
+ * SITE_PIGEONHOLE_PATH and SITE_PIGEONHOLE_RECIPIENTS, then ADAPTER_NAME and one
  * ADAPTER_SET_<KEY> line per adapter setting, nothing on stderr.
  * Exit 2: nothing on stdout; one line per problem on stderr, each starting `site.json: "<field>"`.
  *
@@ -20,10 +21,10 @@ const MAX_DEPTH = 8;
 const HOST = '[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+';
 const KNOWN = [
     'format', 'name', 'public_url', 'local_host', 'local_ip4', 'local_ip6',
-    'tls_port', 'http_port', 'agent_label', 'daemon_prefix', 'adapter', 'backup',
+    'tls_port', 'http_port', 'agent_label', 'daemon_prefix', 'adapter', 'backup', 'pigeonhole',
 ];
 /** The top-level objects whose keys are named with their block ("adapter.name"), here and in every message. */
-const BLOCKS = ['adapter', 'backup'];
+const BLOCKS = ['adapter', 'backup', 'pigeonhole'];
 /** An age X25519 public key: age1 and 58 characters of the encoding's alphabet. Public, so it may be shown. */
 const AGE_RECIPIENT = '/\Aage1[ac-hj-np-z02-9]{58}\z/D';
 const ADAPTER_MAX_SETTINGS = 20;
@@ -55,7 +56,7 @@ function duplicate_keys(string $json): array
     $stack = [];            // one entry per open container: array of seen keys, or null for an array
     $expectKey = false;
     $topKey = null;         // the last key seen directly in the outermost object
-    $blockAt = -1;          // stack index of a top-level block (BLOCKS: "adapter", "backup"), while inside it
+    $blockAt = -1;          // stack index of a top-level block (BLOCKS: "adapter", "backup", "pigeonhole"), while inside it
     $block = '';            // and its name
     $len = strlen($json);
     for ($i = 0; $i < $len; $i++) {
@@ -347,6 +348,54 @@ if (array_key_exists('backup', $data)) {
     }
 }
 
+// pigeonhole: { "path": "/NAME", "recipients": [one or two age public keys] }: the one path of the public site that
+// comments are posted to, and the keys they are encrypted to in the visitor's browser. Absent means no pigeonhole
+// lines, and nothing about comments anywhere. The path is one name, so it can't reach into another folder of the
+// site, hold a query or be another origin. As for the backup, a value that is not a public key is never repeated in
+// the message; here the keys are also printed into the public pages, so a private one must never pass.
+$pigeonholePath = null;
+$pigeonholeRecipients = null;
+if (array_key_exists('pigeonhole', $data)) {
+    $raw = $raw ?? json_decode($text, false, MAX_DEPTH);   // objects stay objects, so {} and [] differ
+    $p = $data['pigeonhole'];
+    if (!is_object($raw->pigeonhole ?? null) || !is_array($p)) {
+        $problems[] = 'site.json: "pigeonhole" must be an object with "path" and "recipients".';
+    } else {
+        foreach (array_keys($p) as $k) {
+            if (!in_array((string) $k, ['path', 'recipients'], true)) {
+                $problems[] = 'site.json: "pigeonhole.' . show((string) $k) . '" is not a known field.';
+            }
+        }
+        if (!array_key_exists('path', $p)) {
+            $problems[] = 'site.json: "pigeonhole.path" is required.';
+        } elseif (!is_string($p['path']) || preg_match('/\A\/[a-z0-9_-]{1,40}\z/D', $p['path']) !== 1) {
+            $problems[] = 'site.json: "pigeonhole.path" must be a slash and one name of 1 to 40 lowercase letters, digits, dashes and underscores, like /_pigeonhole.';
+        } else {
+            $pigeonholePath = $p['path'];
+        }
+        $r = $p['recipients'] ?? null;
+        if (!is_array($r) || !is_array($raw->pigeonhole->recipients ?? null) || count($r) < 1 || count($r) > 2) {
+            $problems[] = 'site.json: "pigeonhole.recipients" must be a list of one or two age public keys.';
+        } else {
+            $keys = [];
+            foreach ($r as $v) {
+                if (!is_string($v) || preg_match(AGE_RECIPIENT, $v) !== 1) {
+                    $keys = null;
+                    break;
+                }
+                $keys[] = $v;
+            }
+            if ($keys === null) {
+                $problems[] = 'site.json: "pigeonhole.recipients" must be a list of one or two age public keys (each age1 and 58 more characters).';
+            } elseif (count(array_unique($keys)) !== count($keys)) {
+                $problems[] = 'site.json: "pigeonhole.recipients" names the same key twice.';
+            } else {
+                $pigeonholeRecipients = implode(' ', $keys);
+            }
+        }
+    }
+}
+
 if ($problems !== []) {
     fwrite(STDERR, implode("\n", $problems) . "\n");
     exit(2);
@@ -370,6 +419,10 @@ foreach ($out as $k => $v) {
 if ($backupRecipients !== null) {
     echo "SITE_BACKUP_RECIPIENTS\t", $backupRecipients, "\n";
     echo "SITE_BACKUP_TO\t", $backupTo, "\n";
+}
+if ($pigeonholePath !== null && $pigeonholeRecipients !== null) {
+    echo "SITE_PIGEONHOLE_PATH\t", $pigeonholePath, "\n";
+    echo "SITE_PIGEONHOLE_RECIPIENTS\t", $pigeonholeRecipients, "\n";
 }
 echo "ADAPTER_NAME\t", $adapterName, "\n";
 foreach ($adapterSettings as $k => $v) {

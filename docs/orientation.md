@@ -142,6 +142,15 @@ gets no shell; set-up makes the key; set-up does the server's side itself over t
 each command and asking first, with an undo; the server's host key is pinned in `site.json` and never learnt
 during a publish; Caddy is documented first.
 
+**Pigeonhole: comments on a static site.** Approved by the owner on 26 November 2026, and built in six stages. A
+visitor's browser encrypts a comment to keys only the owner holds and posts it to one path of the site's own origin;
+the web server forwards it to a store on a private network; the Mac fetches it, opens it, and hands it to WordPress,
+where it waits in the moderation queue; an approved comment shows at the next publish. Built so far (stage 2): the
+Mac's side, which is `site.json`'s `pigeonhole` block, `lib/pigeonhole.php` (the check and the sorter), `offprint
+collect` and `wp offprint import-submission`. Not built: the form and script on a page, the store, the fetch, the
+keys' set-up, and the admin bar's part. Decided: fetched on a schedule but opened only when the owner asks; held
+always; no email about a comment; avatars off; moderating asks for no publish.
+
 Also deferred until something needs it: a WordPress filter that lets a site add its own starting addresses.
 
 ## Known gaps, as of 26 November 2026
@@ -182,6 +191,16 @@ Check each is still true before relying on it or fixing it.
   the owner runs the line it prints.
 - The backup can only be sent to the site's own repository (`backup.to` is `repo`). `bin/publish` makes it in one
   step and sends it in another, so that a second place is an addition.
+- Pigeonhole: an address of the site's own in a comment's words is replaced at import with "[a link to this site]"
+  (a link to a page that isn't there, or the local host name, would fail every publish once the comment was
+  approved). So a commenter can't link to another post of the site: the owner can put the link back when moderating.
+  What is replaced is what the import can see: a host name written some other way than with dots or their four
+  encodings is not.
+- Pigeonhole: a submission that WordPress, the check or the sorter fails on (not refuses) stays in the spool and is
+  tried again on every run, with a `problem:` line each time, until the owner moves it out by hand.
+- Pigeonhole: `offprint collect` imports with `--skip-plugins --skip-themes`, so that no other plugin is handed a
+  stranger's text. A comment on a post of a type that only a plugin or the theme registers is therefore refused
+  ("no such public post") and kept in `rejected/`.
 - There is no release tag yet.
 
 ## Working with the owner

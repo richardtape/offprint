@@ -11,7 +11,7 @@ if (!defined('ABSPATH') && PHP_SAPI !== 'cli') {
 use WP_CLI;
 
 /**
- * Builds the static site from this WordPress.
+ * Builds the static site from this WordPress, and takes a visitor's comment into it.
  */
 final class Command
 {
@@ -62,5 +62,33 @@ final class Command
         }
         WP_CLI::line($report->summary());
         WP_CLI::halt($report->ok() ? 0 : 1);
+    }
+
+    /**
+     * Takes one comment sent to the site's pigeonhole into WordPress, held for moderation.
+     *
+     * Reads one checked submission, a line of JSON, on standard input (offprint collect sends it). Prints one line: "imported ID hold", "imported ID spam", "already ID" (this submission is a comment already) or "refused" and why. Nothing is ever published by this.
+     *
+     * ## OPTIONS
+     *
+     * [--sorted=<word>]
+     * : Which list it goes to: hold (the moderation queue) or spam.
+     * ---
+     * default: hold
+     * ---
+     *
+     * ## EXAMPLES
+     *
+     *     wp offprint import-submission --sorted=hold < submission.json
+     *
+     * @subcommand import-submission
+     *
+     * @param string[]              $args
+     * @param array<string, string> $assoc_args
+     */
+    public function import_submission(array $args, array $assoc_args): void
+    {
+        $json = stream_get_contents(STDIN, Import::MAX_BYTES);
+        WP_CLI::line(Import::run($json === false ? '' : $json, (string) ($assoc_args['sorted'] ?? 'hold')));
     }
 }

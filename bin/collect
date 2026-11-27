@@ -1,0 +1,264 @@
+#!/bin/bash
+# offprint collect: takes the comments waiting in this site's pigeonhole spool into WordPress, held for the owner.
+# Run from inside the site folder (or with OFFPRINT_SITE set to it). It needs a "pigeonhole" block in site.json.
+#
+# A comment a visitor sends is encrypted in their browser, to the public keys in site.json. What reaches this Mac is
+# one file a comment, NAME.age, NAME being the sha256 of its bytes, in the spool. The spool and the two folders beside
+# it are this user's own, under OFFPRINT_HOME (~/Library/Application Support/Offprint unless set), never in the site
+# folder, whose var/ WordPress can read:
+#   OFFPRINT_HOME/pigeonhole/SITE_NAME/spool/      what is waiting. (Nothing fetches into it yet: that is not built.)
+#   OFFPRINT_HOME/pigeonhole/SITE_NAME/done/       what WordPress has taken; emptied of files over 30 days old
+#   OFFPRINT_HOME/pigeonhole/SITE_NAME/rejected/   what was refused, each beside a NAME.age.why saying why, in one line
+#
+# For each file in the spool, in order, and nothing is ever dropped:
+#   1. Its name is matched (64 hex digits and .age), it must be a plain file no larger than a submission can be, and
+#      its bytes must hash to its name. One that fails this is left where it is and counted: it is not what was sent.
+#   2. It is opened with the site's daily key (age -d, the key on a pipe) and checked (lib/pigeonhole.php check): one
+#      that doesn't open, or isn't a submission, moves to rejected/ with its reason.
+#   3. It is sorted (lib/pigeonhole.php sort): hold or spam. A canary (a test submission) moves to done/ here.
+#   4. It is handed to WordPress on a pipe (wp offprint import-submission, with --skip-plugins and --skip-themes: no
+#      plugin of the site's and no theme is loaded, so none is handed a stranger's text or can change how it is
+#      filtered; must-use plugins, the tool's own among them, still are). WordPress answers in one line. "imported"
+#      or "already": the file moves to done/. "refused": to rejected/, with WordPress's reason. Anything else is no
+#      answer: the file stays in the spool for the next run, and this run goes on to the next file, so that one
+#      submission WordPress can't take never holds up those behind it; after two such in a row, WordPress itself is
+#      taken to be the trouble and the run stops. So a crash leaves a duplicate, never a loss, and the import answers
+#      "already" for a duplicate.
+# Importing never publishes anything: every comment waits in WordPress's moderation queue or its spam list.
+#
+# The daily key is in the login Keychain (os/darwin/secret, the secret pigeonhole-daily). It is read into one shell
+# variable, goes to age on a pipe from the shell's own printf, and is unset on every exit: it never reaches a file, a
+# process's arguments, the environment of any process, a log or set -x output (tracing and allexport are turned off
+# first thing, as bin/backup does, and the variable is unset before it is used, so one of its name that the owner's
+# shell had exported is not exported again with the key). What age opens goes down a pipe to the check and exists
+# after that in one shell variable, then on a pipe to WordPress: an opened comment is never in a file, a process's
+# arguments, a log or var/. age's own messages are dropped. A reason kept in rejected/ is one of the tool's own fixed
+# texts, or WordPress's held to plain words: never anything a stranger sent.
+#
+# It holds the publish's lock (var/publish.lock), so it never runs beside a publish or a restore. It writes counts
+# and a time, and nothing else, to var/pigeonhole.json.
+#
+# Prints "ok: ..." (exit 0) or "problem: ..." with what to do (exit 1). Exit 2: a usage mistake, or no site.
+# Needs bash 3.2 (macOS) or newer.
+set -u
+# lib/site.sh first, found by the shell's own builtins: it makes the PATH safe to use before anything is looked up on
+# it, so the age, php and docker run below are never ones WordPress put in the site folder.
+case "${BASH_SOURCE[0]}" in */*) here="${BASH_SOURCE[0]%/*}" ;; *) here=. ;; esac
+. "$here/../lib/site.sh" || exit 2
+set +x
+set +a   # (after set +x, so the one line a trace shows is still "+ set +x"): nothing set below is exported
+. "$TOOL/lib/adapter.sh" || exit 2   # for offprint_secret_get; no adapter is loaded here
+
+[ $# -eq 0 ] || { echo "usage: offprint collect" >&2; exit 2; }
+offprint_find_site
+offprint_load_site
+cd "$SITE" || exit 2
+
+SECRET=pigeonhole-daily
+MAX_BYTES=16384          # no submission's file is larger: the largest today is under 9 KB
+LOCK="$SITE/var/publish.lock"; HAVE_LOCK=0; TMP=""
+cleanup() {
+  identity=""; unset identity
+  checked=""; unset checked
+  [ -z "$TMP" ] || rm -rf "$TMP"
+  [ "$HAVE_LOCK" != 1 ] || rm -rf "$LOCK"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+problem() { printf 'problem: %s\n' "$1"; exit 1; }
+# plural N ONE MANY: "1 ONE" or "N MANY"
+plural() { if [ "$1" = 1 ]; then printf '1 %s' "$2"; else printf '%s %s' "$1" "$3"; fi; }
+
+[ -n "$SITE_PIGEONHOLE_PATH" ] \
+  || problem 'site.json has no "pigeonhole" block, so this site takes no comments and there is nothing to collect.'
+
+# The three folders: this user's own, outside the site folder (WordPress must see neither what is waiting nor why
+# something was refused), each a real folder and not a link.
+home="${OFFPRINT_HOME:-}"
+if [ -z "$home" ]; then
+  case "${HOME:-}" in
+    /*) home="$HOME/Library/Application Support/Offprint" ;;
+    *) problem "HOME isn't set to a folder, so there is nowhere to keep the pigeonhole's spool; set HOME, or OFFPRINT_HOME." ;;
+  esac
+fi
+case "$home" in /*) ;; *) problem "OFFPRINT_HOME must be a whole path, starting with a slash." ;; esac
+BOX="$home/pigeonhole/$SITE_NAME"
+if offprint_inside_site "$BOX"; then
+  problem "the pigeonhole's folder, $(_offprint_shown "$BOX"), is inside the site folder, which WordPress can read and write; set OFFPRINT_HOME to a folder outside it."
+fi
+for d in "$home" "$home/pigeonhole" "$BOX" "$BOX/spool" "$BOX/done" "$BOX/rejected"; do
+  if [ -L "$d" ] || { [ -e "$d" ] && [ ! -d "$d" ]; }; then
+    problem "$(_offprint_shown "$d") is not a folder (a link, or a file); move it away, then collect again."
+  fi
+  if [ ! -d "$d" ]; then
+    # (the Offprint folder itself may need the folders above it, in a new HOME; the rest are made one by one)
+    case "$d" in "$home") mkdir -p "$d" 2> /dev/null ;; *) mkdir "$d" 2> /dev/null ;; esac || problem "couldn't make the folder $(_offprint_shown "$d")."
+    case "$d" in "$home") ;; *) chmod 700 "$d" 2> /dev/null ;; esac
+  fi
+done
+for d in "$BOX" "$BOX/spool" "$BOX/done" "$BOX/rejected"; do
+  if [ -z "$(find "$d" -maxdepth 0 -type d -user "$(id -u)" ! -perm -040 ! -perm -020 ! -perm -010 \
+      ! -perm -004 ! -perm -002 ! -perm -001 -print 2> /dev/null)" ]; then
+    problem "$(_offprint_shown "$d") must be a folder of yours that nobody else can read (chmod 700), and it isn't."
+  fi
+done
+# made after the check above, so a link put in a folder's place in between is still refused
+if offprint_inside_site "$BOX/spool" || offprint_inside_site "$BOX/done" || offprint_inside_site "$BOX/rejected"; then
+  problem "the pigeonhole's folder, $(_offprint_shown "$BOX"), leads into the site folder, which WordPress can read and write; set OFFPRINT_HOME to a folder outside it."
+fi
+SPOOL="$BOX/spool"; DONE="$BOX/done"; REJECTED="$BOX/rejected"
+
+# The lock a publish takes (mkdir is atomic), with the same two notes in it. One that is there already is never
+# taken over here: a publish is running, or left it.
+mkdir -p "$SITE/var" 2> /dev/null
+mkdir "$LOCK" 2> /dev/null \
+  || problem "a publish is running, or left its lock (var/publish.lock); wait for it, then collect again."
+HAVE_LOCK=1
+echo "$$" > "$LOCK/pid"; ps -o command= -p "$$" > "$LOCK/command" 2> /dev/null
+
+imported=0; spam=0; already=0; canaries=0; rejected=0; damaged=0; failed=0; waiting=0; stopped=""; unanswered=0
+# status: the counts of this run and its time, for the admin bar. Numbers only: nothing a stranger sent.
+status() {
+  waiting=0
+  for f in "$SPOOL"/*; do [ ! -e "$f" ] && [ ! -L "$f" ] || waiting=$((waiting + 1)); done
+  printf '{"collected_at":%s,"imported":%s,"spam":%s,"already":%s,"canaries":%s,"rejected":%s,"damaged":%s,"failed":%s,"waiting":%s}\n' \
+    "$(date +%s)" "$imported" "$spam" "$already" "$canaries" "$rejected" "$damaged" "$failed" "$waiting" \
+    > "$SITE/var/pigeonhole.json.$$" 2> /dev/null && mv -f "$SITE/var/pigeonhole.json.$$" "$SITE/var/pigeonhole.json" 2> /dev/null
+  rm -f "$SITE/var/pigeonhole.json.$$" 2> /dev/null
+}
+
+# What was taken more than 30 days ago is removed: it is in WordPress, and in the site's backup.
+find "$DONE" -maxdepth 1 -type f -name '*.age' -mtime +30 -exec rm -f {} + 2> /dev/null
+
+any=0
+for f in "$SPOOL"/*; do [ ! -e "$f" ] && [ ! -L "$f" ] || { any=1; break; }; done
+if [ "$any" = 0 ]; then
+  status
+  echo "ok: nothing is waiting in the pigeonhole's spool."
+  exit 0
+fi
+
+# Something is waiting, so the rest is needed: age, the daily key, and WordPress.
+command -v age > /dev/null 2>&1 || problem "age isn't installed; install it (brew install age) and collect again."
+offprint_private_dir offprint-collect TMP \
+  || problem "couldn't make a private folder for this run${OFFPRINT_PRIVATE_PROBLEM:+: $OFFPRINT_PRIVATE_PROBLEM}."
+running="$(dc ps --status running --services 2> /dev/null < /dev/null)" || running=""
+case "
+$running
+" in
+  *"
+wordpress
+"*) ;;
+  *) problem "WordPress isn't running (offprint compose up -d), so nothing was collected." ;;
+esac
+
+# The daily key, from the login Keychain into one variable (unset first: see the top). What the helper says on a
+# failure is dropped, and said here in this command's own words.
+unset identity rc
+identity=""
+identity="$(offprint_secret_get "$SECRET" 2> /dev/null)"; rc=$?
+case "$rc" in
+  0) ;;
+  1) problem "this site's daily key isn't in the login Keychain (the secret $SECRET), so nothing can be opened. Nothing was collected." ;;
+  3) problem "the login Keychain is locked, so the daily key couldn't be read; unlock it, then collect again." ;;
+  *) problem "the daily key couldn't be read from the login Keychain. Nothing was collected." ;;
+esac
+if ! [[ "$identity" =~ ^AGE-SECRET-KEY-1[A-Z0-9]+$ ]]; then
+  problem "what the login Keychain holds as this site's daily key (the secret $SECRET) is not an age private key. Nothing was collected."
+fi
+
+# reject FILE NAME WHY: FILE to rejected/, with WHY beside it
+reject() {
+  mv -f -- "$1" "$REJECTED/$2" 2> /dev/null || { failed=$((failed + 1)); return; }
+  printf '%s\n' "$3" > "$REJECTED/$2.why" 2> /dev/null
+  rejected=$((rejected + 1))
+}
+# plain WORDS: WORDS when they are a reason's (letters, digits, spaces and , : _ - ' . only, 1 to 160); else a
+# fixed text. What a reason file and the terminal get is never anything else.
+plain() {
+  if [[ "$1" =~ ^[A-Za-z0-9\ ,:_.\'-]{1,160}$ ]]; then printf '%s' "$1"; else printf 'no reason that can be shown'; fi
+}
+
+for f in "$SPOOL"/*; do
+  [ -e "$f" ] || [ -L "$f" ] || continue
+  name="${f##*/}"
+  # 1. Its name, what it is, its size, its hash: all before a byte of it is opened.
+  if ! [[ "$name" =~ ^[0-9a-f]{64}\.age$ ]] || [ -L "$f" ] || [ ! -f "$f" ]; then damaged=$((damaged + 1)); continue; fi
+  size="$(wc -c < "$f" 2> /dev/null | tr -d ' ')" || size=""
+  case "$size" in ''|*[!0-9]*) damaged=$((damaged + 1)); continue ;; esac
+  if [ "$size" -gt "$MAX_BYTES" ]; then damaged=$((damaged + 1)); continue; fi
+  hash="$(php -r 'echo hash_file("sha256", $argv[1]);' -- "$f" 2> /dev/null < /dev/null)" || hash=""
+  if [ "$hash.age" != "$name" ]; then damaged=$((damaged + 1)); continue; fi
+
+  # 2. Opened and checked, in one pipe: age's status and the check's are noted beside it (numbers only).
+  unset checked; checked=""
+  : > "$TMP/why"; : > "$TMP/rc"
+  checked="$( { printf '%s\n' "$identity" | age -d -i - "$f" 2> /dev/null | php "$TOOL/lib/pigeonhole.php" check 2> "$TMP/why"
+                echo "${PIPESTATUS[1]} ${PIPESTATUS[2]}" > "$TMP/rc"; } )"
+  rc="$(cat "$TMP/rc" 2> /dev/null)"
+  case "$rc" in
+    "0 0") ;;
+    "0 1") reject "$f" "$name" "$(plain "$(head -n 1 "$TMP/why" 2> /dev/null)")"; continue ;;
+    "0 "*) failed=$((failed + 1)); continue ;;   # the check itself failed: left for the next run, and on to the next
+    *) reject "$f" "$name" "it does not open with this site's daily key"; continue ;;
+  esac
+
+  # 3. Sorted. A canary is a test of the path, and goes no further.
+  case "$checked" in
+    '{"v":1,"kind":"canary",'*) mv -f -- "$f" "$DONE/$name" 2> /dev/null && canaries=$((canaries + 1)) || failed=$((failed + 1)); continue ;;
+    '{"v":1,"kind":"comment",'*) ;;
+    *) reject "$f" "$name" "it is not a submission this Offprint can pass on"; continue ;;
+  esac
+  verdict="$(printf '%s\n' "$checked" | php "$TOOL/lib/pigeonhole.php" sort 2> /dev/null)" || verdict=""
+  case "$verdict" in
+    hold) sorted=hold ;;
+    spam*) sorted=spam ;;
+    *) failed=$((failed + 1)); continue ;;   # the sorter failed: left for the next run, and on to the next
+  esac
+
+  # 4. To WordPress, on a pipe. Its answer is data: one line, of one of three shapes, or it is no answer.
+  answer="$(printf '%s\n' "$checked" | dc exec -T -u www-data wordpress wp offprint import-submission --sorted="$sorted" \
+    --skip-plugins --skip-themes 2> /dev/null | LC_ALL=C tr -d '\r' | tail -n 1 | head -c 300)" || answer=""
+  checked=""
+  was_unanswered="$unanswered"; unanswered=0
+  if [[ "$answer" =~ ^imported\ [0-9]+\ (hold|spam|trash)$ ]]; then
+    mv -f -- "$f" "$DONE/$name" 2> /dev/null || { failed=$((failed + 1)); continue; }
+    case "$answer" in *" hold") imported=$((imported + 1)) ;; *) spam=$((spam + 1)) ;; esac
+  elif [[ "$answer" =~ ^already\ [0-9]+$ ]]; then
+    mv -f -- "$f" "$DONE/$name" 2> /dev/null || { failed=$((failed + 1)); continue; }
+    already=$((already + 1))
+  elif [[ "$answer" =~ ^refused\ [a-z0-9\ ,:_-]{1,120}$ ]]; then
+    reject "$f" "$name" "wordpress refused it: ${answer#refused }"
+  else
+    # No answer. This file stays, and the next is tried: one submission WordPress can't take must not hold up those
+    # behind it, on this run and every later one. Two in a row, and it is WordPress that is not answering.
+    failed=$((failed + 1)); unanswered=$((was_unanswered + 1))
+    if [ "$unanswered" -ge 2 ]; then
+      stopped="WordPress didn't answer as the import does, twice running (is this site's plugin copy this Offprint's? offprint setup-wp says)"
+      break
+    fi
+  fi
+done
+identity=""; unset identity
+status
+
+# What happened, in the owner's words. A problem when anything is left that should not be.
+said=""
+say() { said="$said${said:+ }$1"; }
+[ "$imported" = 0 ] || say "$(plural "$imported" "comment is" "comments are") waiting for you in WordPress's moderation queue."
+[ "$spam" = 0 ] || say "$(plural "$spam" "went" "went") to WordPress's spam list."
+[ "$already" = 0 ] || say "$(plural "$already" "was a comment already" "were comments already")."
+[ "$canaries" = 0 ] || say "$(plural "$canaries" "test submission arrived" "test submissions arrived")."
+[ "$rejected" = 0 ] || say "$(plural "$rejected" "was refused and is kept" "were refused and are kept"), each with its reason beside it, in $(_offprint_shown "$REJECTED")."
+[ "$damaged" = 0 ] || say "$(plural "$damaged" "thing in the spool is not a submission as it was sent (its name, size or bytes are wrong) and was left" "things in the spool are not submissions as they were sent (a name, size or bytes are wrong) and were left") in $(_offprint_shown "$SPOOL")."
+if [ -n "$stopped" ]; then
+  say "It stopped there: $stopped. $(plural "$waiting" "submission is" "submissions are") still in the spool, and nothing is lost: collect again."
+fi
+if [ -n "$stopped" ] || [ "$failed" != 0 ] || [ "$damaged" != 0 ]; then
+  [ -n "$stopped" ] || [ "$failed" = 0 ] || say "$(plural "$failed" "submission couldn't be taken this time and is" "submissions couldn't be taken this time and are") still in the spool; nothing is lost: collect again. One that is left every time can be moved out of $(_offprint_shown "$SPOOL") by hand."
+  printf 'problem: %s\n' "$said"
+  exit 1
+fi
+printf 'ok: %s\n' "$said"
+exit 0

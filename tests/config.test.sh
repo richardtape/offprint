@@ -312,6 +312,53 @@ newsite; with "\"backup\":{\"recipients\":[\"$Q62\"],\"recipients\":[\"$P62\"]}"
 newsite; with "\"backup\":{\"recipients\":[\"$Q62\"]},\"adapter\":{\"name\":\"x\",\"recipients\":\"a\",\"recipients\":\"b\"}"
 refused_text "a duplicate in the adapter block after a backup block is still named with adapter" 'site.json: "adapter.recipients" appears more than once'
 newsite; with "\"backup\":{\"recipients\":[\"$Q62\"]},\"backup\":{\"recipients\":[\"$P62\"]}"; refused_text "the backup key twice" 'site.json: "backup" appears more than once'
+# pigeonhole block: the path comments are posted to, and the age public keys they are encrypted to in the browser
+pigeonhole_lines() { printf '%s' "${expected_fixture/mysite.test/wp.local}
+SITE_PIGEONHOLE_PATH${TAB}$1
+SITE_PIGEONHOLE_RECIPIENTS${TAB}$2
+ADAPTER_NAME${TAB}none"; }
+newsite; with "\"pigeonhole\":{\"path\":\"/_pigeonhole\",\"recipients\":[\"$Q62\"]}"
+loads "a pigeonhole block with one recipient: its two lines after the ten" "$(pigeonhole_lines /_pigeonhole "$Q62")"
+newsite; with "\"pigeonhole\":{\"path\":\"/drop-box_2\",\"recipients\":[\"$Q62\",\"$P62\"]}"
+loads "a pigeonhole block with two recipients: both, in the file's order, on one line" "$(pigeonhole_lines /drop-box_2 "$Q62 $P62")"
+newsite; with "\"backup\":{\"recipients\":[\"$P62\"]},\"pigeonhole\":{\"path\":\"/_pigeonhole\",\"recipients\":[\"$Q62\"]},\"adapter\":{\"name\":\"x\"}"
+run
+if [ "$code" -eq 0 ] && [ "$(printf '%s\n' "$out" | sed -n '11,15p' | cut -f1 | tr '\n' ' ')" = "SITE_BACKUP_RECIPIENTS SITE_BACKUP_TO SITE_PIGEONHOLE_PATH SITE_PIGEONHOLE_RECIPIENTS ADAPTER_NAME " ]; then ok "with a backup and an adapter: the backup's lines, then the pigeonhole's, then the adapter's"; else bad "pigeonhole order (exit $code, out: $out, err: $err)"; fi
+newsite; put "{$base}"; run
+if [ "$code" -eq 0 ] && ! contains "$out" "SITE_PIGEONHOLE_"; then ok "no pigeonhole block: config.php prints no SITE_PIGEONHOLE_ line"; else bad "no pigeonhole block (exit $code, out: $out, err: $err)"; fi
+ph_msg='site.json: "pigeonhole" must be an object with "path" and "recipients".'
+ph_path_msg='site.json: "pigeonhole.path" must be a slash and one name of 1 to 40 lowercase letters, digits, dashes and underscores, like /_pigeonhole.'
+ph_list_msg='site.json: "pigeonhole.recipients" must be a list of one or two age public keys.'
+ph_key_msg='site.json: "pigeonhole.recipients" must be a list of one or two age public keys (each age1 and 58 more characters).'
+ph() { with "\"pigeonhole\":{\"path\":$1,\"recipients\":$2}"; }
+newsite; with '"pigeonhole":"yes"';                      refused_text "a pigeonhole that is a string" "$ph_msg"
+newsite; with '"pigeonhole":[]';                         refused_text "a pigeonhole that is a list" "$ph_msg"
+newsite; with '"pigeonhole":{}';                         refused_text "a pigeonhole with nothing in it: the path is asked for" 'site.json: "pigeonhole.path" is required.'
+if contains "$err" "$ph_list_msg"; then ok "... and the recipients, in the same run"; else bad "empty pigeonhole: recipients not asked for ($err)"; fi
+newsite; with "\"pigeonhole\":{\"recipients\":[\"$Q62\"]}"; refused_text "a pigeonhole with no path" 'site.json: "pigeonhole.path" is required.'
+newsite; with '"pigeonhole":{"path":"/_pigeonhole"}';    refused_text "a pigeonhole with no recipients" "$ph_list_msg"
+for p in '"_pigeonhole"' '"/"' '""' '"/a/b"' '"/a/"' '"//a"' '"/Drop"' '"/a b"' '"/a.b"' '"/a?b"' '"/a#b"' '"/%2e"' '"/.."' '"/a\n"' '"/a\u0000"' "\"/$(printf 'a%.0s' $(seq 1 41))\"" '7' 'null' '["/a"]' '"https://www.example.com/a"'; do
+  newsite; ph "$p" "[\"$Q62\"]"; refused_text "a pigeonhole path of $(printf '%s' "$p" | cut -c1-24)" "$ph_path_msg"
+done
+newsite; ph "\"/$(printf 'a%.0s' $(seq 1 40))\"" "[\"$Q62\"]"; run
+if [ "$code" -eq 0 ]; then ok "a pigeonhole path of 40 characters after the slash is allowed"; else bad "40-character path ($err)"; fi
+newsite; ph '"/_pigeonhole"' '[]';                        refused_text "pigeonhole: an empty list of recipients" "$ph_list_msg"
+newsite; ph '"/_pigeonhole"' "\"$Q62\"";                  refused_text "pigeonhole: recipients that is a string" "$ph_list_msg"
+newsite; ph '"/_pigeonhole"' "{\"a\":\"$Q62\"}";          refused_text "pigeonhole: recipients that is an object" "$ph_list_msg"
+newsite; ph '"/_pigeonhole"' "[\"$Q62\",\"$P62\",\"age1$(printf 'z%.0s' $(seq 1 58))\"]"; refused_text "pigeonhole: three recipients" "$ph_list_msg"
+newsite; ph '"/_pigeonhole"' '["age1short"]';             refused_text "pigeonhole: a recipient that is too short" "$ph_key_msg"
+newsite; ph '"/_pigeonhole"' "[\"${Q62}q\"]";             refused_text "pigeonhole: a recipient one character too long" "$ph_key_msg"
+newsite; ph '"/_pigeonhole"' "[\"$Q62\\n\"]";             refused_text "pigeonhole: a recipient with a trailing newline" "$ph_key_msg"
+newsite; ph '"/_pigeonhole"' '[7]';                       refused_text "pigeonhole: a recipient that is a number" "$ph_key_msg"
+newsite; ph '"/_pigeonhole"' "[\"$Q62\",null]";           refused_text "pigeonhole: a second recipient that is null" "$ph_key_msg"
+# A private key pasted where the public one belongs: refused, and never repeated. Here it would be worse than in the
+# backup's block: these keys are printed into every page of the public site.
+newsite; ph '"/_pigeonhole"' "[\"$secret\"]";             refused_text "pigeonhole: a private key given as a recipient" "$ph_key_msg"
+if ! contains "$err$out" "AGE-SECRET-KEY"; then ok "pigeonhole: a private key given as a recipient is not repeated in the message"; else bad "pigeonhole: a private key was echoed ($err)"; fi
+newsite; ph '"/_pigeonhole"' "[\"$Q62\",\"$Q62\"]";       refused_text "pigeonhole: the same recipient twice" 'site.json: "pigeonhole.recipients" names the same key twice.'
+newsite; with "\"pigeonhole\":{\"path\":\"/_pigeonhole\",\"recipients\":[\"$Q62\"],\"colour\":1}"; refused_text "an unknown key in the pigeonhole block" 'site.json: "pigeonhole.colour" is not a known field.'
+newsite; with "\"pigeonhole\":{\"path\":\"/a\",\"path\":\"/b\",\"recipients\":[\"$Q62\"]}"; refused_text "path twice in the pigeonhole block" 'site.json: "pigeonhole.path" appears more than once'
+newsite; with "\"pigeonhole\":{\"path\":\"/a\",\"recipients\":[\"$Q62\"]},\"pigeonhole\":{\"path\":\"/b\",\"recipients\":[\"$Q62\"]}"; refused_text "the pigeonhole key twice" 'site.json: "pigeonhole" appears more than once'
 newsite; put "{$base}"; head -c 70000 /dev/zero | tr '\0' ' ' >> "$site/site.json"
 refused_text "a file over 64 KB" '64'
 newsite; put "{$base}"; printf '\0' >> "$site/site.json"
@@ -448,6 +495,13 @@ shell_cases() {  # $1 = bash to test with
   newsite; put "{$base}"
   sh_out="$(cd / && SITE_BACKUP_RECIPIENTS=inherited SITE_BACKUP_TO=inherited OFFPRINT_SITE="$site" "$B" -c ". '$root/lib/site.sh'; offprint_find_site; offprint_load_site; printf '%s|%s' \"\$SITE_BACKUP_RECIPIENTS\" \"\$SITE_BACKUP_TO\"" 2>&1)"
   if [ "$sh_out" = "|" ]; then ok "[$t] offprint_load_site, no backup block: both empty, whatever the environment held"; else bad "[$t] load no backup ($sh_out)"; fi
+  # the pigeonhole's two values: set from the block, and empty (never inherited) without one
+  newsite; with "\"pigeonhole\":{\"path\":\"/_pigeonhole\",\"recipients\":[\"$Q62\",\"$P62\"]}"
+  sh_out="$(cd / && OFFPRINT_SITE="$site" "$B" -c ". '$root/lib/site.sh'; offprint_find_site; offprint_load_site; printf '%s|%s' \"\$SITE_PIGEONHOLE_PATH\" \"\$SITE_PIGEONHOLE_RECIPIENTS\"" 2>&1)"
+  if [ "$sh_out" = "/_pigeonhole|$Q62 $P62" ]; then ok "[$t] offprint_load_site sets SITE_PIGEONHOLE_PATH and SITE_PIGEONHOLE_RECIPIENTS"; else bad "[$t] load pigeonhole ($sh_out)"; fi
+  newsite; put "{$base}"
+  sh_out="$(cd / && SITE_PIGEONHOLE_PATH=/inherited SITE_PIGEONHOLE_RECIPIENTS=inherited OFFPRINT_SITE="$site" "$B" -c ". '$root/lib/site.sh'; offprint_find_site; offprint_load_site; printf '%s|%s' \"\$SITE_PIGEONHOLE_PATH\" \"\$SITE_PIGEONHOLE_RECIPIENTS\"" 2>&1)"
+  if [ "$sh_out" = "|" ]; then ok "[$t] offprint_load_site, no pigeonhole block: both empty, whatever the environment held"; else bad "[$t] load no pigeonhole ($sh_out)"; fi
   # adapter variables
   newsite; cp "$root/tests/fixtures/site.json" "$site/"
   sh_out="$(cd / && OFFPRINT_SITE="$site" "$B" -c ". '$root/lib/site.sh'; offprint_find_site; offprint_load_site; printf '%s|%s' \"\$ADAPTER_NAME\" \"\$(compgen -v | grep -c '^ADAPTER_SET_')\"" 2>&1)"

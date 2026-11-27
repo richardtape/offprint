@@ -646,6 +646,138 @@ check "offprint_own_project: the real $PROJECT project is its folder's own (0)" 
 OWN_RC=$( ( SITE_NAME="$PROJECT"; SITE="$TOOL"; OFFPRINT_PROJECT_OK=""; offprint_own_project >/dev/null 2>&1; echo $? ) )
 check "offprint_own_project: control: the same project asked about another folder (1)" equals "$OWN_RC" 1
 
+# --- a comment from the pigeonhole, imported (wp offprint import-submission) ----------------------------------------
+# What offprint collect hands WordPress, one checked submission a time on a pipe, loading no plugin but the tool's own
+# and no theme: here the lines are made as lib/pigeonhole.php prints them. Importing never publishes; the HTML filter
+# is on (under WP-CLI it is off by itself); a link keeps its address only when it is a whole one to another site; and
+# the same submission twice is one comment.
+PH_TS=$(( $(date +%s) - 100 ))
+PH_N=0
+# ph POST PARENT AUTHOR EMAIL URL CONTENT [KIND]: one checked submission, with an id of its own, as PH_LINE
+ph() {
+  PH_N=$((PH_N + 1))
+  PH_LINE=$(PH_ID=$(printf '%032x' "$PH_N") PH_TS="$PH_TS" php -r 'require $argv[1];
+    $f = ["post_id" => (int) $argv[2], "parent" => (int) $argv[3], "author" => $argv[4], "email" => $argv[5], "url" => $argv[6], "content" => $argv[7], "hp" => "", "elapsed" => 42];
+    $kind = $argv[8] ?? "comment";
+    echo offprint_pigeonhole_line(["v" => 1, "kind" => $kind, "id" => getenv("PH_ID"), "ts" => (int) getenv("PH_TS"), "page" => "/", "fields" => $kind === "comment" ? $f : []]), "\n";' \
+    "$TOOL/lib/pigeonhole.php" "$@")
+}
+# ph_import SORTED [LINE]: WordPress's one-line answer to PH_LINE (or LINE), as PH_OUT, and the comment's number as PH_C
+ph_import() {
+  PH_OUT=$(printf '%s\n' "${2-$PH_LINE}" | dc exec -T -u www-data wordpress wp offprint import-submission --sorted="$1" --skip-plugins --skip-themes 2>&1 | tail -1)
+  PH_C=$(printf '%s' "$PH_OUT" | sed -n 's/^imported \([0-9][0-9]*\) [a-z]*$/\1/p')
+}
+ph_field() { wp comment get "$1" --field="$2" 2>/dev/null; }
+ph_refused() { ph_import hold; check "pigeonhole: refused: $1" equals "$PH_OUT" "refused $2"; }
+ph_no_mail() {
+  check "pigeonhole: no mail was sent $1" test ! -e "$E2E_WP_CONTENT/e2e-mail.log"
+  [ ! -e "$E2E_WP_CONTENT/e2e-mail.log" ] || sed 's/^/    mail: /' "$E2E_WP_CONTENT/e2e-mail.log"
+  rm -f "$E2E_WP_CONTENT/e2e-mail.log"
+}
+# every mail WordPress tries to send is noted, and none is sent
+cat > "$E2E_WP_CONTENT/mu-plugins/zz-e2e-mail.php" <<'PHP'
+<?php
+add_filter('pre_wp_mail', function ($r, $a) { file_put_contents(WP_CONTENT_DIR . '/e2e-mail.log', $a['subject'] . "\n", FILE_APPEND); return true; }, 10, 2);
+PHP
+chmod a+r "$E2E_WP_CONTENT/mu-plugins/zz-e2e-mail.php"
+wp eval 'wp_mail("e2e@example.com", "control", "x");' >/dev/null 2>&1
+check "pigeonhole: control: a mail WordPress sends is noted"   grep -qx control "$E2E_WP_CONTENT/e2e-mail.log"
+rm -f "$E2E_WP_CONTENT/e2e-mail.log"
+wp option update comment_moderation 0 >/dev/null; wp option update comment_previously_approved 0 >/dev/null   # WordPress would publish at once
+wp option update moderation_notify 1 >/dev/null; wp option update comments_notify 1 >/dev/null               # and send mail about it
+PH_POST=$(wp post create --post_title='Takes comments' --post_name=takes-comments --post_status=publish --post_author=1 --comment_status=open --post_content='<!-- wp:paragraph --><p>Open.</p><!-- /wp:paragraph -->' --porcelain)
+PH_OTHER=$(wp post create --post_title='Also takes comments' --post_status=publish --post_author=1 --comment_status=open --post_content='x' --porcelain)
+PH_CLOSED=$(wp post create --post_title='Closed' --post_status=publish --post_author=1 --comment_status=closed --post_content='x' --porcelain)
+PH_DRAFT=$(wp post create --post_title='Draft' --post_status=draft --post_author=1 --comment_status=open --post_content='x' --porcelain)
+PH_LOCKED=$(wp post create --post_title='Locked' --post_status=publish --post_author=1 --comment_status=open --post_password=secret --post_content='x' --porcelain)
+PH_APPROVED_BEFORE=$(wp comment list --status=approve --format=count)
+
+ph "$PH_POST" 0 Ada ada@example.com https://other.example.com/ada 'MARKER-GOOD a comment with <b>bold</b> in it'; PH_GOOD=$PH_LINE
+ph_import hold; PH_C1=$PH_C
+check "pigeonhole: a good comment is imported, held ($PH_OUT)" test -n "$PH_C1"
+check "pigeonhole: ... not approved, though WordPress's settings would publish it at once" equals "$(ph_field "$PH_C1" comment_approved)" 0
+check "pigeonhole: ... as no user"                             equals "$(ph_field "$PH_C1" user_id)" 0
+check "pigeonhole: ... dated when the visitor sent it"         equals "$(ph_field "$PH_C1" comment_date_gmt)" "$(php -r 'echo gmdate("Y-m-d H:i:s", (int) $argv[1]);' "$PH_TS")"
+check "pigeonhole: ... with no address of the visitor's"       equals "$(ph_field "$PH_C1" comment_author_IP)" ""
+check "pigeonhole: ... its allowed markup kept"                contains "$(ph_field "$PH_C1" comment_content)" '<b>bold</b>'
+check "pigeonhole: ... its web address, a whole one on another site, kept" equals "$(ph_field "$PH_C1" comment_author_url)" 'https://other.example.com/ada'
+check "pigeonhole: ... and its submission's id noted"          equals "$(wp comment meta get "$PH_C1" offprint_pigeonhole_id)" "$(printf '%032x' 1)"
+ph_import hold "$PH_GOOD"
+check "pigeonhole: the same submission again is the same comment" equals "$PH_OUT" "already $PH_C1"
+check "pigeonhole: ... once"                                   equals "$(wp comment list --post_id="$PH_POST" --status=all --format=count)" 1
+
+# Hostile markup, and links to this site itself: the exporter follows those, and one to a page that isn't there (or to
+# wp-admin) would fail every publish once the comment was approved.
+ph "$PH_POST" 0 Mallory mallory@example.com "$PUBLIC/not-there-either" "MARKER-XSS <script>alert(1)</script><img src=x onerror=alert(2)> <a href=\"javascript:alert(3)\" onclick=\"alert(4)\">one</a> <a href=\"/wp-admin/\">two</a> <a href=\"https://other.example.com/ok\">three</a> <a href=\"$PUBLIC/not-there\">four</a> <a href=\"https://$LOCAL/not-there\">five</a> <blockquote cite=\"$PUBLIC/not-there-cite\">six</blockquote> <iframe src=\"https://other.example.com/\"></iframe> seven $PUBLIC/bare-not-there eight ${PUBLIC#https://}/wp-admin/ nine $LOCAL ten $(printf '%s' "$LOCAL" | sed 's/\./\&#46;/g') <a href=\"https://other.example.com/?$LOCAL\">eleven</a>"
+ph_import hold; PH_C2=$PH_C
+check "pigeonhole: a hostile comment is imported, held, seconds after the first ($PH_OUT)" equals "$(ph_field "$PH_C2" comment_approved)" 0
+PH_STORED=$(ph_field "$PH_C2" comment_content)
+for bad in '<script' 'onerror' 'onclick' 'javascript:' '<iframe' '<img' 'href="alert' 'wp-admin' 'not-there' "$LOCAL" "${PUBLIC#https://}" '&#46;' 'other.example.com/?'; do
+  check "pigeonhole: ... with no $bad left in what WordPress stored" lacks "$PH_STORED" "$bad"
+done
+check "pigeonhole: ... each address of this site's own in its words replaced, the words around it kept" \
+  sh -c "printf '%s' \"\$1\" | grep -q 'seven \\[a link to this site\\] eight \\[a link to this site\\] nine \\[a link to this site\\] ten \\[a link to this site\\]'" _ "$PH_STORED"
+check "pigeonhole: ... its whole link to another site kept"    contains "$PH_STORED" 'href="https://other.example.com/ok"'
+check "pigeonhole: ... the words of its other links kept"      sh -c "printf '%s' \"\$1\" | grep -q 'four' && printf '%s' \"\$1\" | grep -q 'six'" _ "$PH_STORED"
+check "pigeonhole: ... and its web address, on this site, dropped" equals "$(ph_field "$PH_C2" comment_author_url)" ""
+
+ph "$PH_POST" 0 Spammer spam@example.com '' 'MARKER-SPAM buy things'; ph_import spam; PH_C3=$PH_C
+check "pigeonhole: one the Mac sorted as spam goes to the spam list ($PH_OUT)" equals "$(ph_field "$PH_C3" comment_approved)" spam
+
+ph "$PH_CLOSED" 0 Ada ada@example.com '' 'x y z';  ph_refused "a post with comments closed" 'no such public post, or its comments are closed'
+ph "$PH_DRAFT" 0 Ada ada@example.com '' 'x y z';   ph_refused "a draft" 'no such public post, or its comments are closed'
+ph "$PH_LOCKED" 0 Ada ada@example.com '' 'x y z';  ph_refused "a post behind a password" 'no such public post, or its comments are closed'
+ph 999999 0 Ada ada@example.com '' 'x y z';        ph_refused "a post that isn't there" 'no such public post, or its comments are closed'
+ph "$PH_POST" "$PH_C1" Grace grace@example.com '' 'a reply too soon'; ph_refused "a reply to a held comment" 'its parent is not an approved comment on that post'
+ph "$PH_POST" 999999 Grace grace@example.com '' 'a reply to nothing'; ph_refused "a reply to a comment that isn't there" 'its parent is not an approved comment on that post'
+ph_no_mail "about any of those"
+wp comment approve "$PH_C1" >/dev/null
+rm -f "$E2E_WP_CONTENT/e2e-mail.log"   # (approving by hand tells the post's author: not the import's doing)
+ph "$PH_OTHER" "$PH_C1" Grace grace@example.com '' 'a reply elsewhere'; ph_refused "a reply to a comment on another post" 'its parent is not an approved comment on that post'
+ph "$PH_POST" "$PH_C1" Grace grace@example.com '' 'MARKER-REPLY a reply'; ph_import hold; PH_C4=$PH_C
+check "pigeonhole: a reply to an approved comment is imported, held ($PH_OUT)" equals "$(ph_field "$PH_C4" comment_approved)" 0
+check "pigeonhole: ... under its parent"                       equals "$(ph_field "$PH_C4" comment_parent)" "$PH_C1"
+# Ada has an approved comment now, and WordPress's settings would let her next one straight through.
+ph "$PH_POST" 0 Ada ada@example.com '' 'MARKER-AGAIN a second from an approved author'; ph_import hold; PH_C5=$PH_C
+check "pigeonhole: a second comment from an approved author is still held ($PH_OUT)" equals "$(ph_field "$PH_C5" comment_approved)" 0
+ph "$PH_POST" 0 '' ada@example.com '' 'x y z';              ph_refused "no name, where the site asks for one" 'this site asks for a name and an email address'
+ph "$PH_POST" 0 '   ' ada@example.com '' 'x y z';           ph_refused "a name of spaces, where the site asks for one" 'this site asks for a name and an email address'
+ph "$PH_POST" 0 Ada 'not an address' '' 'x y z';            ph_refused "an email address that isn't one" 'its email address is not one'
+wp option update comment_registration 1 >/dev/null
+ph "$PH_POST" 0 Ada ada@example.com '' 'x y z';            ph_refused "a site that takes comments from its users only" 'this site takes comments from its registered users only'
+wp option update comment_registration 0 >/dev/null
+ph "$PH_POST" 0 "$LOCAL" local@example.com '' 'MARKER-NAMED a comment from someone named for the local host'; ph_import hold; PH_C6=$PH_C
+check "pigeonhole: a commenter named for the local host is imported ($PH_OUT), without that name" equals "$(ph_field "$PH_C6" comment_author)" '[a link to this site]'
+ph "$PH_POST" 0 Ada ada@example.com '' '<img src=x> <script></script>'; ph_refused "text that is nothing once filtered" 'nothing is left of its text once filtered'
+ph "$PH_POST" 0 Ada ada@example.com https://other.example.com/ada 'MARKER-GOOD a comment with <b>bold</b> in it'; ph_refused "the same text from the same author again" 'comment_duplicate'
+ph 0 0 '' '' '' '' canary;                                  ph_refused "a canary is not a comment" 'it is not a checked comment'
+ph_import hold 'junk'
+check "pigeonhole: refused: junk"                              equals "$PH_OUT" 'refused it is not a checked comment'
+ph "$PH_POST" 0 Ada ada@example.com '' 'x y z'; ph_import publish
+check "pigeonhole: refused: sorted as something else"          equals "$PH_OUT" 'refused it was sorted as neither hold nor spam'
+check "pigeonhole: nothing was published by importing: one more approved comment, the one approved here by hand" \
+  equals "$(wp comment list --status=approve --format=count)" "$((PH_APPROVED_BEFORE + 1))"
+ph_no_mail "about those either"
+# Approved, the hostile comment must neither run anything on the public page nor stop the publish.
+wp comment approve "$PH_C2" "$PH_C6" >/dev/null
+rm -f "$E2E_WP_CONTENT/mu-plugins/zz-e2e-mail.php" "$E2E_WP_CONTENT/e2e-mail.log"
+wp post delete "$PH_LOCKED" --force >/dev/null   # (its password form posts to the login page, which the checks refuse)
+run_export pigeonhole
+PH_PAGE=$(cat "$E2E_EXPORT/pigeonhole/takes-comments/index.html" 2>/dev/null)
+check "pigeonhole: with the hostile comment approved, the export still succeeds" equals "$EXPORT_STATUS" 0
+[ "$EXPORT_STATUS" = 0 ] || printf '%s\n%s\n' "$EXPORT_OUT" "$EXPORT_ERR" | grep -i error | head -8 | sed 's/^/    pigeonhole export: /'
+check "pigeonhole: ... the approved comments are on the page"  sh -c "printf '%s' \"\$1\" | grep -q MARKER-GOOD && printf '%s' \"\$1\" | grep -q MARKER-XSS" _ "$PH_PAGE"
+check "pigeonhole: ... the held and spam ones are not"         sh -c "! printf '%s' \"\$1\" | grep -q 'MARKER-REPLY\|MARKER-SPAM\|MARKER-AGAIN'" _ "$PH_PAGE"
+check "pigeonhole: ... the one named for the local host is, under its replaced name" contains "$PH_PAGE" 'MARKER-NAMED'
+for bad in '<script>alert' 'onerror' 'onclick' 'javascript:' '<iframe' 'href="alert' 'not-there'; do
+  check "pigeonhole: ... and the page has no $bad"             lacks "$PH_PAGE" "$bad"
+done
+check "pigeonhole: ... nor any commenter's email address"      never_says "$E2E_EXPORT/pigeonhole" 'ada@example.com\|mallory@example.com'
+check_site_as_published "$E2E_EXPORT/pigeonhole" "$WORK/pigeonhole-checked"
+PH_CHECK=$?
+[ "$PH_CHECK" = 0 ] || printf '%s\n' "$CHECK_OUT" | head -8 | sed 's/^/    pigeonhole check: /'
+check "pigeonhole: ... and it passes bin/check-site"           equals "$PH_CHECK" 0
+
 # --- summary ------------------------------------------------------------------------------------
 echo "$PASSED passed, $FAILED failed"
 [ "$FAILED" -eq 0 ]

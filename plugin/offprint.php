@@ -16,7 +16,7 @@ if ( ! defined( 'ABSPATH' ) && PHP_SAPI !== 'cli' ) {
 
 $offprint_files = array(
 	'Origin', 'Paths', 'Rules', 'Links', 'Export_Mode',
-	'Report', 'Output', 'Fetcher', 'Fetch', 'Seeds', 'Exporter', 'Command',
+	'Report', 'Output', 'Fetcher', 'Fetch', 'Seeds', 'Exporter', 'Import', 'Command',
 	'Status_View', 'Request', 'Admin_Bar',
 );
 $offprint_ok    = true;

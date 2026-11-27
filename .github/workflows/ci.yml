@@ -71,6 +71,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: bash tests/backup.test.sh
 
+      - name: offprint collect tests
+        if: ${{ !cancelled() }}
+        run: bash tests/collect.test.sh
+
       - name: offprint new tests
         if: ${{ !cancelled() }}
         run: bash tests/new.test.sh

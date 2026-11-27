@@ -19,14 +19,19 @@ bin/publish                   export, check, back up (the database dump, encrypt
 bin/backup                    offprint backup verify (the committed backup opens with the owner's key, and is a whole
                               dump) and restore (the local database replaced from it or from a dump file, the one
                               before kept encrypted in var/before-restore/)
+bin/collect                   offprint collect: what waits in a site's pigeonhole spool (comments, each encrypted in a
+                              visitor's browser) opened with the daily key, checked, sorted and handed to WordPress,
+                              held; the spool is under OFFPRINT_HOME, never in the site folder
 bin/publish-agent             what launchd runs when WordPress asks for a publish; takes var/inbox/publish-request
 bin/check-site                the export checks; bin/check-site-addresses.php does the link, image, form and feed checks
 bin/setup-wp                  makes a site's local WordPress (certificate, containers, install, options); on a WordPress it
                               installs, deletes the untouched Sample Page; on any run, commits the tool's own plugin/
                               (never the copy WordPress can write) when HEAD doesn't have it
 bin/wp                        WP-CLI inside the site's container
-lib/config.php                validates site.json (its backup and adapter blocks too), prints KEY<TAB>value lines or errors
-                              (exit 2)
+lib/config.php                validates site.json (its backup, pigeonhole and adapter blocks too), prints KEY<TAB>value
+                              lines or errors (exit 2)
+lib/pigeonhole.php            one opened submission checked (exact size, keys, types, lengths, its time), and sorted
+                              (hold or spam); no WordPress function, and a reason never repeats what was sent
 lib/site.sh                   finds the site folder, loads config into SITE_* and ADAPTER_* variables, defines dc();
                               offprint_plugin_list, the tool's plugin/ as a commit holds it (setup-wp commits it, and a
                               publish refuses a commit whose plugin isn't exactly it)
@@ -40,7 +45,9 @@ os/darwin/host-undo.sh        reverses it for one site
 os/darwin/hosts-block.sh      reads and writes the marked block of a hosts file
 os/darwin/install-agent       the user's launchd agent that runs bin/publish-agent
 os/darwin/secret              a named secret of a site's in the login Keychain (get, set, delete)
-plugin/                       the WordPress plugin: offprint.php, offprint/{admin-bar.css,admin-bar.js,src/*.php}
+plugin/                       the WordPress plugin: offprint.php, offprint/{admin-bar.css,admin-bar.js,src/*.php};
+                              src/Import.php is wp offprint import-submission, which makes a held comment of one
+                              checked submission
 templates/                    compose.yaml, Caddyfile, wordpress/Dockerfile, site.gitignore (for a site's repo)
 docs/how-it-fits-together.md  the diagrams of what lives where and of a publish (README.md embeds the second), and a
                               publish step by step
@@ -50,6 +57,7 @@ docs/reference.md             site.json, the backup and restore, every command (
 docs/security.md              the table of what could go wrong and what stops it
 docs/orientation.md           the picture for an agent new to the project: read it before a first change
 tests/                        every suite (tests/php, tests/fixtures, *.test.sh, *.test.js, e2e.sh, compat-seo.sh);
+                              tests/collect-real.sh runs offprint collect with the real age (not in CI);
                               tests/fixtures/adapters/workflow is an adapter outside the tool, for tests/publish.test.sh;
                               tests/fixtures/age-standin is the stand-in age every suite that publishes puts first on
                               the PATH, and tests/backup-real.sh runs the real age the same ways (not in CI);
@@ -85,6 +93,16 @@ tests/                        every suite (tests/php, tests/fixtures, *.test.sh,
   through a filter that hides its value. The database backup's private key is such a token, and is not Offprint's to
   keep at all: a publish encrypts to public keys only, and `offprint backup verify` and `restore` hold the key the owner
   types in one shell variable, for the pipes to `age` (two in a restore: the whole-first read, then the import).
+  A site's pigeonhole daily key is such a token too, kept in the login Keychain: `offprint collect` holds it in one
+  shell variable for the pipe to `age`. And an opened comment is treated the same way: it exists on pipes and in one
+  shell variable, never in a file, an argument, a log or `var/`.
+- A comment is a stranger's text. It reaches WordPress only through `wp offprint import-submission`, which holds
+  every comment, turns WordPress's HTML filter on (and refuses without it), keeps a link's address only when it is a
+  whole one to another site, and replaces an address of the site's own in a comment's words (the exporter follows
+  every link to the site, and the checks refuse the local host name anywhere: either would fail every publish once
+  the comment was approved). What WordPress answers to an import is data: one line of three shapes, or no answer.
+  One submission that can't be taken never holds up those behind it.
+  Each of these has a test and a comment saying why, as the publish's defences have.
 - The database dump is never committed, or left in `backup/`, readable: a publish refuses a site with no `backup` block
   or no `age`, and the readable dump in `var/` is removed on every exit.
 - A `TMPDIR` that is the site folder or inside it, or can't be entered, is refused before any temporary file is made
@@ -97,13 +115,16 @@ tests/                        every suite (tests/php, tests/fixtures, *.test.sh,
   `my-site`, the account id `0123456789abcdef0123456789abcdef`.
 - Built: the adapters `none` and `cloudflare-workers` (`offprint adapter setup` and `doctor` set it up and check it);
   `offprint new` (a site folder only: it runs no set-up); the encrypted database backup, `offprint backup verify` and
-  `offprint backup restore`. Not built: any place to send the backup but the site's repository; the `ssh` adapter; a
-  top-level `setup`, `doctor` or `upgrade`. Do not describe those as if they were.
+  `offprint backup restore`. Built in part: Pigeonhole, comments on a static site. What is built is the Mac's side
+  (`site.json`'s `pigeonhole` block, `offprint collect`, the import); what is not is everything that gets a comment
+  to the Mac (the form and script on a page, the server that stores submissions, fetching from it, making the keys),
+  so no site can take a comment yet. Not built: any place to send the backup but the site's repository; the `ssh`
+  adapter; a top-level `setup`, `doctor` or `upgrade`. Do not describe those as if they were.
 
 ## Tests
 
 ```sh
-composer install && vendor/bin/phpunit      # 262 tests
+composer install && vendor/bin/phpunit      # 430 tests
 node --test tests/*.test.js                 # 11 tests
 bash tests/check-site.test.sh               # 407
 bash tests/new.test.sh                      # 381
@@ -113,20 +134,22 @@ bash tests/secret.test.sh                   # 335
 bash tests/agent.test.sh                    # 305
 bash tests/hosts-block.test.sh              # 4
 bash tests/host.test.sh                     # 780
-bash tests/config.test.sh                   # 275
+bash tests/config.test.sh                   # 323
 bash tests/names.test.sh                    # 9
 bash tests/backup.test.sh                   # 273
-bash tests/e2e.sh                           # 275; needs Docker; not in CI
+bash tests/collect.test.sh                  # 366
+bash tests/e2e.sh                           # 341; needs Docker; not in CI
 bash tests/compat-seo.sh wordpress-seo      # 6; needs Docker and the network; not in CI; never beside e2e.sh
 bash tests/backup-real.sh                   # 15; needs the real age (brew install age); not in CI
 bash tests/restore-real.sh                  # 31; needs Docker, mkcert and the real age; not in CI
+bash tests/collect-real.sh                  # 20; needs the real age; not in CI
 bash tests/site.test.sh SITE_DIR            # needs a real, running site; not in CI
 ```
 
 The shell suites print one `ok` or `FAIL` line per case; the counts above are the `ok` lines on macOS. On Linux (CI)
 they differ: `check-site`, `publish`, `adapter`, `agent` and `host` print fewer, since the cases that need the Mac
 (`plutil`, or a disk that takes two letter cases for one name) are skipped there, with a `skip` line; `config` prints
-more, since some of its cases run again under a second bash. All but the last five are hermetic and run in CI.
+more, since some of its cases run again under a second bash. All but the last six are hermetic and run in CI.
 `tests/adapter.test.sh` (the adapter contract, both adapters, `offprint adapter setup` and `doctor`) and
 `tests/secret.test.sh` (`os/darwin/secret`) are the adapters' suites; `tests/new.test.sh` is `offprint new`'s (its
 setup-wp half, the Sample Page and the plugin commit, is in `tests/publish.test.sh`, with setup-wp's other cases). CI
@@ -158,6 +181,11 @@ the `plutil` and `install-agent` cases) are never run in CI. So run `check-site`
 - No test runs the real `age` but `tests/backup-real.sh`, which makes its keys in shell variables only and touches no
   site. Every other suite that reaches a publish or `offprint backup verify` has `tests/fixtures/age-standin` first on
   the `PATH`. Run `tests/backup-real.sh` on the Mac before merging any change to the backup.
+- `tests/collect.test.sh` runs `offprint collect` with a stand-in `age`, `docker` and `security` (`OFFPRINT_SECURITY`),
+  and `OFFPRINT_HOME` inside its temp folder. `tests/collect-real.sh` runs the real `age` with keys of its own, in
+  shell variables only, and the same stand-ins for the rest: run it on the Mac before merging any change to
+  `bin/collect`. Never run `offprint collect` for a real site outside a step the owner attends: it reads the login
+  Keychain and writes to that site's WordPress.
 - `offprint backup restore` replaces a WordPress's whole database. Run it only against a stand-in `docker`
   (`tests/backup.test.sh`), or against the throwaway site `tests/restore-real.sh` makes (compose project
   `offprint-restore-real`, in a temporary folder, removed on exit; it refuses to start while that project exists).

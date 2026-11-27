@@ -75,7 +75,8 @@ detail.
 
 - Not built: a top-level `setup`, `doctor` and `upgrade`; an adapter for a server you run over SSH; pinning a site to
   an exact Offprint version; anywhere to send the backup but the site's own repository.
-- Comments are closed in the export, and a form has nowhere to post (the export warns). Search, and any page address
+- Comments are closed in the export, and a form has nowhere to post (the export warns). Taking comments is being
+  built and is not finished: [what is built](docs/reference.md#comments-pigeonhole-what-is-built). Search, and any page address
   with a query string, is not exported. Only the main feed is.
 - Every publish crawls the whole site again. A page that is in no sitemap and linked from nowhere is missed.
 - `wp-content/` (uploads, themes, plugins) is committed as it is; only the database backup is encrypted.

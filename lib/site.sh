@@ -333,6 +333,8 @@ _offprint_find_site_folder() {
 
 # Runs lib/config.php on $SITE and assigns the ten SITE_* variables, SITE_BACKUP_RECIPIENTS (the age public keys the
 # database backup is encrypted to, space-separated) and SITE_BACKUP_TO (both empty when site.json has no backup block),
+# SITE_PIGEONHOLE_PATH and SITE_PIGEONHOLE_RECIPIENTS (the path comments are posted to and the age public keys they are
+# encrypted to; both empty when site.json has no pigeonhole block),
 # ADAPTER_NAME ("none" when site.json has no adapter block) and ADAPTER_SET_* (one per adapter setting). Only those names are ever assigned (an ADAPTER_SET_ key must match
 # ^ADAPTER_SET_[A-Z][A-Z0-9_]{0,40}$); any other line the validator prints is ignored.
 # Exits 2 on any problem, having printed it.
@@ -349,6 +351,8 @@ offprint_read_site() {
   SITE_IP6=""; SITE_TLS_PORT=""; SITE_HTTP_PORT=""; SITE_AGENT_LABEL=""; SITE_DAEMON_PREFIX=""
   # the backup's two are site.json's "backup" block, and empty without one: never the environment's
   SITE_BACKUP_RECIPIENTS=""; SITE_BACKUP_TO=""
+  # nor the pigeonhole's two: with no block there is no pigeonhole, whatever the environment says
+  SITE_PIGEONHOLE_PATH=""; SITE_PIGEONHOLE_RECIPIENTS=""
   # nothing ADAPTER_* is inherited from the environment or an earlier load
   for old in $(compgen -v ADAPTER_SET_); do unset "$old"; done
   ADAPTER_NAME=none
@@ -383,6 +387,8 @@ offprint_read_site() {
       SITE_DAEMON_PREFIX) SITE_DAEMON_PREFIX="$value" ;;
       SITE_BACKUP_RECIPIENTS) SITE_BACKUP_RECIPIENTS="$value" ;;
       SITE_BACKUP_TO) SITE_BACKUP_TO="$value" ;;
+      SITE_PIGEONHOLE_PATH) SITE_PIGEONHOLE_PATH="$value" ;;
+      SITE_PIGEONHOLE_RECIPIENTS) SITE_PIGEONHOLE_RECIPIENTS="$value" ;;
       ADAPTER_NAME) ADAPTER_NAME="$value" ;;
       ADAPTER_SET_*)
         if printf '%s' "$key" | grep -Eq '^ADAPTER_SET_[A-Z][A-Z0-9_]{0,40}$'; then printf -v "$key" '%s' "$value"; fi ;;
@@ -397,7 +403,7 @@ EOT
      || [ -z "$SITE_AGENT_LABEL" ] || [ -z "$SITE_DAEMON_PREFIX" ]; then
     SITE_NAME=""; SITE_PUBLIC_URL=""; SITE_PUBLIC_HOST=""; SITE_LOCAL_HOST=""; SITE_IP4=""
     SITE_IP6=""; SITE_TLS_PORT=""; SITE_HTTP_PORT=""; SITE_AGENT_LABEL=""; SITE_DAEMON_PREFIX=""
-    SITE_BACKUP_RECIPIENTS=""; SITE_BACKUP_TO=""
+    SITE_BACKUP_RECIPIENTS=""; SITE_BACKUP_TO=""; SITE_PIGEONHOLE_PATH=""; SITE_PIGEONHOLE_RECIPIENTS=""
     for old in $(compgen -v ADAPTER_SET_); do unset "$old"; done
     ADAPTER_NAME=none
     OFFPRINT_SITE_PROBLEMS="site.json: the loader did not get all ten values; refusing to continue."

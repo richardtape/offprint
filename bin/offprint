@@ -29,6 +29,9 @@ usage: offprint COMMAND [ARGS...]
   offprint backup restore [--from FILE] [--unchecked] [--yes]
                                              replace the local database with the committed backup's (or a dump
                                              file's), keeping an encrypted copy of the one it replaces
+  offprint collect                           take the comments waiting in the site's pigeonhole spool into WordPress,
+                                             held for moderation (needs a pigeonhole block in site.json; nothing
+                                             fetches comments into the spool yet)
   offprint adapter setup [--yes]             set up on this Mac what the site's host adapter needs (each step says
                                              what it will do, and asks first; --yes: yes to each)
   offprint adapter doctor                    check what the site's host adapter needs, and the live site: one ok or
@@ -67,6 +70,7 @@ case "$cmd" in
   new) exec /bin/bash "$BIN/new" "$@" ;;
   publish) exec /bin/bash "$BIN/publish" "$@" ;;
   backup) exec /bin/bash "$BIN/backup" "$@" ;;
+  collect) exec /bin/bash "$BIN/collect" "$@" ;;
   agent) exec /bin/bash "$BIN/publish-agent" "$@" ;;
   wp) exec /bin/bash "$BIN/wp" "$@" ;;
   setup-wp) exec /bin/bash "$BIN/setup-wp" "$@" ;;

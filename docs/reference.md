@@ -26,6 +26,7 @@ starting `site.json: "<field>"`.
 | `agent_label` | no | Letters, digits, dots and dashes, starting with a letter or digit, at most 100 characters. | `local.offprint.NAME.publish` |
 | `daemon_prefix` | no | The same rule as `agent_label`. | `local.offprint.NAME` |
 | `backup` | no, but a publish refuses without it | Who the database backup is encrypted to: an object, `{"recipients": ["age1…"]}`, with one or two age public keys (each `age1` and 58 more characters), not the same one twice. Its only other key is `"to"`, where the backup is sent: `"repo"` (the site's own repository) is the one place there is. | none |
+| `pigeonhole` | no | Comments (not finished: see [Comments](#comments-pigeonhole-what-is-built)): an object, `{"path": "/_pigeonhole", "recipients": ["age1…"]}`. `path` is a slash and one name of 1 to 40 lowercase letters, digits, dashes and underscores; `recipients` is one or two age public keys, not the same one twice. | none |
 | `adapter` | no | The site's host adapter: an object, `{"name": "NAME", ...}`. NAME is lowercase letters, digits and dashes, starting with a letter, at most 41 characters: an adapter in the tool's `adapters/`, or else in the site folder's own `adapters/`, committed. Its other keys are the adapter's settings, at most 20, each named with lowercase letters, digits and underscores, starting with a letter, at most 41 characters, and each a string of 1 to 200 letters, digits and `. _ : / @ + = -`, or an integer from 0 to 2147483647; the adapter checks them itself. | `{"name": "none"}` |
 
 A hostname is at most 253 characters, each label at most 63. An example:
@@ -146,6 +147,9 @@ usage: offprint COMMAND [ARGS...]
   offprint backup restore [--from FILE] [--unchecked] [--yes]
                                              replace the local database with the committed backup's (or a dump
                                              file's), keeping an encrypted copy of the one it replaces
+  offprint collect                           take the comments waiting in the site's pigeonhole spool into WordPress,
+                                             held for moderation (needs a pigeonhole block in site.json; nothing
+                                             fetches comments into the spool yet)
   offprint adapter setup [--yes]             set up on this Mac what the site's host adapter needs (each step says
                                              what it will do, and asks first; --yes: yes to each)
   offprint adapter doctor                    check what the site's host adapter needs, and the live site: one ok or
@@ -272,6 +276,34 @@ takes the agent away.
 A site uses whichever Offprint you run, and keeps the copy of the plugin that `setup-wp` committed until you replace
 it. A publish commits no plugin but the one of the Offprint you run, so after an upgrade that changes the plugin it
 refuses until you do, and says the command. Pinning a site to an exact Offprint version is not built.
+
+## Comments (Pigeonhole): what is built
+
+Pigeonhole is how a static Offprint site will take comments: a visitor's browser encrypts a comment to a key only
+you hold, it waits in a store nobody on the internet can reach, your Mac fetches and opens it, and it lands in
+WordPress's own moderation queue. **It is not finished, and no site can take a comment yet.** Built today is the
+Mac's side only:
+
+- The `pigeonhole` block in `site.json` (above). Without it nothing about comments happens anywhere.
+- `offprint collect`. For each file waiting in the site's spool it checks the file is what was sent (its name is the
+  hash of its bytes), opens it with the site's daily key from the login Keychain, checks that what it holds is a
+  comment and nothing else, sorts it (held, or spam when a hidden field was filled in or it was sent within 3
+  seconds), and hands it to WordPress. It ends with one `ok:` or `problem:` line.
+- The import in WordPress. Every comment is held, whatever WordPress's settings would allow; its HTML is filtered;
+  a link keeps its address only when it is a whole `http(s)` one to another site, and an address of this site's own
+  in the comment's words becomes "[a link to this site]" (a link to a page of yours that isn't there would fail
+  every publish; put a real link back when you moderate, if you want it); the same comment arriving twice is one
+  comment; and no email is sent about it. It is imported with no plugin of the site's and no theme loaded, so a
+  comment on a post of a type that only a plugin or the theme registers is refused.
+
+The spool is `~/Library/Application Support/Offprint/pigeonhole/NAME/spool/` (`OFFPRINT_HOME` moves
+`~/Library/Application Support/Offprint`), never in the site folder. Beside it, `done/` holds what WordPress took
+(emptied of files over 30 days old) and `rejected/` what was refused, each with a `.why` file saying why in one line.
+Nothing is ever dropped. A comment WordPress doesn't answer for stays in the spool and the run goes on to the next;
+after two such in a row the run stops, and the next run tries again.
+
+Not built: the comment form and script on a page, the store, fetching from it, making the keys, the admin bar's
+count, and replies on the public page.
 
 ## Publishing to Cloudflare Workers
 
@@ -401,14 +433,16 @@ it. Its last line is the table's row. It needs Docker and the network (the plugi
 | `host-setup`, `host-undo` | `bash tests/host.test.sh` | no (a pretend machine) | yes |
 | `site.json` loader | `bash tests/config.test.sh` | no | yes |
 | `offprint backup verify` and `restore` | `bash tests/backup.test.sh` | no (stand-in `age` and `docker`) | yes |
+| `offprint collect` | `bash tests/collect.test.sh` | no (stand-in `age`, `docker` and `security`) | yes |
 | Names that must not be in the tool | `bash tests/names.test.sh` | no | yes |
 | End to end | `bash tests/e2e.sh` | yes | no |
 | A plugin that replaces WordPress's sitemaps | `bash tests/compat-seo.sh SLUG` | yes, and the network | no |
 | The backup, with the real `age` | `bash tests/backup-real.sh` | no (but `age`, installed) | no |
 | A restore, with the real tools | `bash tests/restore-real.sh` | yes, and `age` and `mkcert` | no |
+| `offprint collect`, with the real `age` | `bash tests/collect-real.sh` | no (but `age`, installed) | no |
 | A running site | `bash tests/site.test.sh SITE_DIR` | yes (a set-up site) | no |
 
-The first thirteen need only bash, git, PHP, Perl and Node. The suites that publish use a stand-in `age`
+The first fourteen need only bash, git, PHP, Perl and Node. The suites that publish use a stand-in `age`
 (`tests/fixtures/age-standin`); `tests/backup-real.sh` runs the real one the same ways, and is run on the Mac before a
 change to the backup is merged. `tests/restore-real.sh` makes a real, throwaway site folder (`offprint new`,
 `offprint setup-wp`, a publish with `--no-push`) in the compose project `offprint-restore-real`, restores into it

@@ -233,7 +233,8 @@ CONFIG
 
 # pigeonhole_ssh_close: the run's agent killed, and the key with it. (Its folder is the caller's to remove.)
 pigeonhole_ssh_close() {
-  [ -z "$PH_SSH_PID" ] || { kill "$PH_SSH_PID" 2> /dev/null; wait "$PH_SSH_PID" 2> /dev/null; PH_SSH_PID=""; }
+  # shellcheck disable=SC2046 # one pid a word
+  [ -z "$PH_SSH_PID" ] || { kill $(pgrep -P "$PH_SSH_PID" 2> /dev/null) "$PH_SSH_PID" 2> /dev/null; wait "$PH_SSH_PID" 2> /dev/null; PH_SSH_PID=""; }
   [ -z "$PH_AGENT_PID" ] || { kill "$PH_AGENT_PID" 2> /dev/null; wait "$PH_AGENT_PID" 2> /dev/null; }
   PH_AGENT_PID=""
 }
@@ -250,7 +251,10 @@ pigeonhole_ssh() {
   PH_SSH_PID=$!
   while kill -0 "$PH_SSH_PID" 2> /dev/null && [ "$SECONDS" -lt "$end" ]; do sleep 0.1; done
   if kill -0 "$PH_SSH_PID" 2> /dev/null; then
-    kill "$PH_SSH_PID" 2> /dev/null; wait "$PH_SSH_PID" 2> /dev/null; PH_SSH_PID=""
+    # It and what it started (the ssh of the hop through the web server): one of those left alive would hold this
+    # function's output open, and whoever reads it would wait on for as long as that one lived.
+    # shellcheck disable=SC2046 # one pid a word
+    kill $(pgrep -P "$PH_SSH_PID" 2> /dev/null) "$PH_SSH_PID" 2> /dev/null; wait "$PH_SSH_PID" 2> /dev/null; PH_SSH_PID=""
     return 124
   fi
   wait "$PH_SSH_PID" 2> /dev/null; rc=$?; PH_SSH_PID=""

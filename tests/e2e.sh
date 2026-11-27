@@ -647,8 +647,8 @@ OWN_RC=$( ( SITE_NAME="$PROJECT"; SITE="$TOOL"; OFFPRINT_PROJECT_OK=""; offprint
 check "offprint_own_project: control: the same project asked about another folder (1)" equals "$OWN_RC" 1
 
 # --- a comment from the pigeonhole, imported (wp offprint import-submission) ----------------------------------------
-# What offprint collect hands WordPress, one checked submission a time on a pipe, loading no plugin but the tool's own
-# and no theme: here the lines are made as lib/pigeonhole.php prints them. Importing never publishes; the HTML filter
+# What offprint collect hands WordPress, one checked submission a time on a pipe, with the site's plugins and theme
+# loaded: here the lines are made as lib/pigeonhole.php prints them. Importing never publishes; the HTML filter
 # is on (under WP-CLI it is off by itself); a link keeps its address only when it is a whole one to another site; and
 # the same submission twice is one comment.
 PH_TS=$(( $(date +%s) - 100 ))
@@ -664,7 +664,7 @@ ph() {
 }
 # ph_import SORTED [LINE]: WordPress's one-line answer to PH_LINE (or LINE), as PH_OUT, and the comment's number as PH_C
 ph_import() {
-  PH_OUT=$(printf '%s\n' "${2-$PH_LINE}" | dc exec -T -u www-data wordpress wp offprint import-submission --sorted="$1" --skip-plugins --skip-themes 2>&1 | tail -1)
+  PH_OUT=$(printf '%s\n' "${2-$PH_LINE}" | dc exec -T -u www-data wordpress wp offprint import-submission --sorted="$1" 2>&1 | tail -1)
   PH_C=$(printf '%s' "$PH_OUT" | sed -n 's/^imported \([0-9][0-9]*\) [a-z]*$/\1/p')
 }
 ph_field() { wp comment get "$1" --field="$2" 2>/dev/null; }
@@ -755,6 +755,20 @@ ph_import hold 'junk'
 check "pigeonhole: refused: junk"                              equals "$PH_OUT" 'refused it is not a checked comment'
 ph "$PH_POST" 0 Ada ada@example.com '' 'x y z'; ph_import publish
 check "pigeonhole: refused: sorted as something else"          equals "$PH_OUT" 'refused it was sorted as neither hold nor spam'
+# A post of a type that a plugin registers takes comments like any other: the import loads the site's plugins.
+mkdir -p "$E2E_WP_CONTENT/plugins/e2e-books"
+cat > "$E2E_WP_CONTENT/plugins/e2e-books/e2e-books.php" <<'PHP'
+<?php
+/* Plugin Name: E2E Books */
+add_action('init', function () { register_post_type('e2e_book', array('public' => true, 'label' => 'Books', 'supports' => array('title', 'editor', 'comments'))); });
+PHP
+chmod -R a+rX "$E2E_WP_CONTENT/plugins/e2e-books"
+wp plugin activate e2e-books >/dev/null
+PH_BOOK=$(wp post create --post_type=e2e_book --post_title='A book' --post_status=publish --post_author=1 --comment_status=open --post_content='x' --porcelain)
+ph "$PH_BOOK" 0 Ada ada@example.com '' 'MARKER-BOOK a comment on a book'; ph_import hold; PH_C7=$PH_C
+check "pigeonhole: a comment on a post of a type a plugin registers is imported, held ($PH_OUT)" equals "$(ph_field "$PH_C7" comment_approved)" 0
+check "pigeonhole: ... on that post"                          equals "$(ph_field "$PH_C7" comment_post_ID)" "$PH_BOOK"
+wp post delete "$PH_BOOK" --force >/dev/null; wp plugin deactivate e2e-books >/dev/null; rm -rf "$E2E_WP_CONTENT/plugins/e2e-books"
 check "pigeonhole: nothing was published by importing: one more approved comment, the one approved here by hand" \
   equals "$(wp comment list --status=approve --format=count)" "$((PH_APPROVED_BEFORE + 1))"
 ph_no_mail "about those either"

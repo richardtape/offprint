@@ -198,9 +198,10 @@ Check each is still true before relying on it or fixing it.
   encodings is not.
 - Pigeonhole: a submission that WordPress, the check or the sorter fails on (not refuses) stays in the spool and is
   tried again on every run, with a `problem:` line each time, until the owner moves it out by hand.
-- Pigeonhole: `offprint collect` imports with `--skip-plugins --skip-themes`, so that no other plugin is handed a
-  stranger's text. A comment on a post of a type that only a plugin or the theme registers is therefore refused
-  ("no such public post") and kept in `rejected/`.
+- Pigeonhole: the import loads the site's plugins and theme (the owner's decision: a post type a plugin registers
+  must take comments). So a plugin that sends new comments to a service of its own is handed imported ones too, and
+  nothing warns the owner of it yet. `offprint setup-wp` names the plugins WordPress's image adds (one such service's
+  among them) but deletes none.
 - There is no release tag yet.
 
 ## Working with the owner

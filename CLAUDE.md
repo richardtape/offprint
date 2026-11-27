@@ -138,7 +138,7 @@ bash tests/config.test.sh                   # 323
 bash tests/names.test.sh                    # 9
 bash tests/backup.test.sh                   # 273
 bash tests/collect.test.sh                  # 366
-bash tests/e2e.sh                           # 341; needs Docker; not in CI
+bash tests/e2e.sh                           # 343; needs Docker; not in CI
 bash tests/compat-seo.sh wordpress-seo      # 6; needs Docker and the network; not in CI; never beside e2e.sh
 bash tests/backup-real.sh                   # 15; needs the real age (brew install age); not in CI
 bash tests/restore-real.sh                  # 31; needs Docker, mkcert and the real age; not in CI

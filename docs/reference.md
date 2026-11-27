@@ -293,8 +293,9 @@ Mac's side only:
   a link keeps its address only when it is a whole `http(s)` one to another site, and an address of this site's own
   in the comment's words becomes "[a link to this site]" (a link to a page of yours that isn't there would fail
   every publish; put a real link back when you moderate, if you want it); the same comment arriving twice is one
-  comment; and no email is sent about it. It is imported with no plugin of the site's and no theme loaded, so a
-  comment on a post of a type that only a plugin or the theme registers is refused.
+  comment; and no email is sent about it. It is imported with the site's plugins and theme loaded, so a
+  post of a type one of them registers takes comments like any other; a plugin of yours that acts on new comments
+  (one that sends them to a spam service, say) is handed these too.
 
 The spool is `~/Library/Application Support/Offprint/pigeonhole/NAME/spool/` (`OFFPRINT_HOME` moves
 `~/Library/Application Support/Offprint`), never in the site folder. Beside it, `done/` holds what WordPress took

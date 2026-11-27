@@ -16,10 +16,11 @@
 #   2. It is opened with the site's daily key (age -d, the key on a pipe) and checked (lib/pigeonhole.php check): one
 #      that doesn't open, or isn't a submission, moves to rejected/ with its reason.
 #   3. It is sorted (lib/pigeonhole.php sort): hold or spam. A canary (a test submission) moves to done/ here.
-#   4. It is handed to WordPress on a pipe (wp offprint import-submission, with --skip-plugins and --skip-themes: no
-#      plugin of the site's and no theme is loaded, so none is handed a stranger's text or can change how it is
-#      filtered; must-use plugins, the tool's own among them, still are). WordPress answers in one line. "imported"
-#      or "already": the file moves to done/. "refused": to rejected/, with WordPress's reason. Anything else is no
+#   4. It is handed to WordPress on a pipe (wp offprint import-submission), with the site's plugins and theme loaded
+#      as they are for any visitor: a post of a type that one of them registers takes comments like any other (the
+#      owner's decision, 26 November 2026). So a plugin of the site's that acts on new comments is handed this one
+#      too; the import holds the comment and checks its filter whatever a plugin does. WordPress answers in one
+#      line. "imported" or "already": the file moves to done/. "refused": to rejected/, with WordPress's reason. Anything else is no
 #      answer: the file stays in the spool for the next run, and this run goes on to the next file, so that one
 #      submission WordPress can't take never holds up those behind it; after two such in a row, WordPress itself is
 #      taken to be the trouble and the run stops. So a crash leaves a duplicate, never a loss, and the import answers
@@ -219,7 +220,7 @@ for f in "$SPOOL"/*; do
 
   # 4. To WordPress, on a pipe. Its answer is data: one line, of one of three shapes, or it is no answer.
   answer="$(printf '%s\n' "$checked" | dc exec -T -u www-data wordpress wp offprint import-submission --sorted="$sorted" \
-    --skip-plugins --skip-themes 2> /dev/null | LC_ALL=C tr -d '\r' | tail -n 1 | head -c 300)" || answer=""
+    2> /dev/null | LC_ALL=C tr -d '\r' | tail -n 1 | head -c 300)" || answer=""
   checked=""
   was_unanswered="$unanswered"; unanswered=0
   if [[ "$answer" =~ ^imported\ [0-9]+\ (hold|spam|trash)$ ]]; then

@@ -57,7 +57,7 @@ echo "$*" >> "$STUB_DIR/docker.calls"
 [ "${1:-}" = compose ] || exit 0
 case "$*" in
   *" ps "*) [ -f "$STUB_DIR/wp_down" ] || printf 'wordpress\ndb\n'; exit 0 ;;
-  *" wp offprint import-submission "*)
+  *" wp offprint import-submission"*)
     i=$(( $(cat "$STUB_DIR/import.count" 2>/dev/null || echo 0) + 1 )); echo "$i" > "$STUB_DIR/import.count"
     cat > "$STUB_DIR/import.$i"
     if [ -f "$STUB_DIR/answer.$i" ]; then cat "$STUB_DIR/answer.$i"
@@ -155,8 +155,9 @@ check "$t: the file is in done" "$first" "$(ls "$B/done")"
 check "$t: WordPress was handed one line, the checked submission" 1 "$(wc -l < "$S/import.1" | tr -d ' ')"
 has "$t: ... which is the comment" "\"content\":\"$MARK a comment" "$(cat "$S/import.1")"
 has "$t: ... starting as a checked comment does" '{"v":1,"kind":"comment","id":"' "$(cut -c1-30 "$S/import.1")"
-has "$t: the import is told it was held" " wp offprint import-submission --sorted=hold " "$(cat "$S/docker.calls")"
-has "$t: ... loads no other plugin and no theme" "--skip-plugins --skip-themes" "$(grep import-submission "$S/docker.calls")"
+has "$t: the import is told it was held" " wp offprint import-submission --sorted=hold" "$(cat "$S/docker.calls")"
+# (the site's plugins and theme are loaded: a post of a type one of them registers must take comments)
+lacks "$t: ... and is not told to leave out the site's plugins or theme" "--skip-" "$(grep import-submission "$S/docker.calls")"
 has "$t: ... as the web server's user, with no terminal" "exec -T -u www-data wordpress wp " "$(grep import-submission "$S/docker.calls")"
 has "$t: age is given the key on a pipe" "-d -i - $SP/$first (a key of ${#KEY} characters on standard input)" "$(cat "$S/age.calls")"
 check "$t: ... and not in its environment" no "$(cat "$S/age.env")"

@@ -455,6 +455,45 @@ final class ExporterTest extends TestCase
         ], $report->warnings);
     }
 
+    public function test_a_form_posting_to_the_one_address_something_takes_is_not_warned_about(): void
+    {
+        // A site with a pigeonhole: its comment form can't post by itself (a script sends what it holds).
+        $comment = '<form method="dialog" action="/_pigeonhole"><textarea name="comment"></textarea></form>';
+        foreach ($this->routes_with_forms($comment) as $path => $route) {
+            $this->fetcher->routes[self::O . $path] = $route;
+        }
+        $exporter = new Exporter(self::O, $this->fetcher, 'wp.local', self::SECRET, 20000, self::O . '/_pigeonhole');
+        $report = $exporter->run($this->out, new Seeds([self::O . '/']));
+        $this->assertSame([
+            // the same address, from forms that would get it or post it: nothing on a static site takes either
+            'a form posting to ' . self::O . '/_pigeonhole is on 1 page, first seen on ' . self::O . "/a/; it won't work on the static site",
+            'a form posting to ' . self::O . '/_pigeonhole is on 1 page, first seen on ' . self::O . "/b/; it won't work on the static site",
+            // another address
+            'a form posting to ' . self::O . '/_pigeonhole/x is on 1 page, first seen on ' . self::O . "/a/; it won't work on the static site",
+            'a form posting to ' . self::O . '/search/ is on 1 page, first seen on ' . self::O . "/a/; it won't work on the static site",
+        ], self::sorted($report->warnings));
+    }
+
+    public function test_without_such_an_address_that_form_is_warned_about_like_any_other(): void
+    {
+        $comment = '<form method="dialog" action="/_pigeonhole"><textarea name="comment"></textarea></form>';
+        $report = $this->export($this->routes_with_forms($comment));
+        $this->assertContains(
+            'a form posting to ' . self::O . '/_pigeonhole is on 2 pages, first seen on ' . self::O . "/; it won't work on the static site",
+            $report->warnings
+        );
+    }
+
+    /** @return array<string, array> */
+    private function routes_with_forms(string $comment): array
+    {
+        return [
+            '/' => self::page("<a href=\"/a/\">a</a><a href=\"/b/\">b</a>$comment"),
+            '/a/' => self::page("$comment<form action=\"/_pigeonhole\"></form><form method=\"dialog\" action=\"/_pigeonhole/x\"></form><form method=\"post\" action=\"/search/\"></form>"),
+            '/b/' => self::page('<form method="post" action="/_pigeonhole"></form>'),
+        ];
+    }
+
     public function test_a_redirect_to_the_same_file_is_another_link_to_it(): void
     {
         $report = $this->export([

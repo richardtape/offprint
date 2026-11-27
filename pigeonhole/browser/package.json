@@ -1,0 +1,14 @@
+{
+  "name": "offprint-pigeonhole-browser",
+  "description": "The script a page with a comment form loads: it encrypts the comment in the visitor's browser and posts it to the site's pigeonhole. Built into plugin/offprint/ (see build.sh).",
+  "private": true,
+  "license": "GPL-2.0-or-later",
+  "type": "module",
+  "dependencies": {
+    "@noble/hashes": "2.4.0",
+    "age-encryption": "0.3.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

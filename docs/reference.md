@@ -281,8 +281,8 @@ refuses until you do, and says the command. Pinning a site to an exact Offprint 
 
 Pigeonhole is how a static Offprint site will take comments: a visitor's browser encrypts a comment to a key only
 you hold, it waits in a store nobody on the internet can reach, your Mac fetches and opens it, and it lands in
-WordPress's own moderation queue. **It is not finished, and no site can take a comment yet.** Built today is the
-Mac's side only:
+WordPress's own moderation queue. **It is not finished, and no site can take a comment yet.** Built today are the
+Mac's side and the page's side, and nothing between them:
 
 - The `pigeonhole` block in `site.json` (above). Without it nothing about comments happens anywhere.
 - `offprint collect`. For each file waiting in the site's spool it checks the file is what was sent (its name is the
@@ -303,8 +303,28 @@ The spool is `~/Library/Application Support/Offprint/pigeonhole/NAME/spool/` (`O
 Nothing is ever dropped. A comment WordPress doesn't answer for stays in the spool and the run goes on to the next;
 after two such in a row the run stops, and the next run tries again.
 
-Not built: the comment form and script on a page, the store, fetching from it, making the keys, the admin bar's
-count, and replies on the public page.
+On the page, for a site with the block (WordPress takes it when its container is made, so after adding or changing
+it run `offprint compose up -d`):
+
+- A post with comments open shows WordPress's own comment form, with a block naming the path and the keys, and a
+  loader of under 1 KB. The form cannot post by itself (its method is `dialog`, which a browser does nothing with):
+  only the script sends, and only what it has encrypted, so a visitor whose browser never ran the script sends
+  nothing. A post with comments closed, and every other page,
+  is as before. A site that takes comments from its registered users only shows no form.
+- The first time a visitor touches the form, the loader fetches the script that does the work (about 52 KB
+  compressed). On Post Comment it pads the comment to one fixed size, encrypts it in the browser to your keys, does a
+  short proof of work, and posts it to `path` on the site's own origin. Nothing readable leaves the page, and the
+  visitor is told whether it was sent, or what to put right first.
+- Reply links stay on the page: WordPress's own reply script moves the form under the comment. Avatars are off.
+- `bin/check-site` refuses the export when a page's block is not exactly `site.json`'s path and keys; when the
+  comment form is not exactly as printed (once, with the block, unable to post); when anything else on a page would
+  send to the path, however its address is written; or when either script is not byte for byte the tool's own.
+
+A comment form is only any use on a host that forwards `path` to the site's pigeonhole, so a publish refuses a
+site with the block unless its adapter says its host does (`ADAPTER_PIGEONHOLE=1`: see
+[A site's own adapter](#a-sites-own-adapter)). Neither built-in adapter does.
+
+Not built: the store, fetching from it, making the keys, and the admin bar's count.
 
 ## Publishing to Cloudflare Workers
 
@@ -377,7 +397,8 @@ folder, with `adapter.sh` in it, committed whole, and `"adapter": {"name": "NAME
 them. An adapter that defines nothing but how to ask the live site which publish it serves is enough for a host that
 deploys by itself when the site's repository is pushed: `tests/fixtures/adapters/workflow/adapter.sh` is one, for a
 deploy workflow that writes `build.json`, naming the commit, at the root of the live site. The publish then pushes,
-and waits until the live site names the commit it pushed.
+and waits until the live site names the commit it pushed. An adapter whose host is a web server of yours that forwards
+the pigeonhole's path sets `ADAPTER_PIGEONHOLE=1`; without it a publish refuses a site with a `pigeonhole` block.
 
 ## The one privileged step
 
@@ -435,15 +456,17 @@ it. Its last line is the table's row. It needs Docker and the network (the plugi
 | `site.json` loader | `bash tests/config.test.sh` | no | yes |
 | `offprint backup verify` and `restore` | `bash tests/backup.test.sh` | no (stand-in `age` and `docker`) | yes |
 | `offprint collect` | `bash tests/collect.test.sh` | no (stand-in `age`, `docker` and `security`) | yes |
+| The page's scripts (comments) | `node --test tests/pigeonhole-browser.test.js` | no | yes |
 | Names that must not be in the tool | `bash tests/names.test.sh` | no | yes |
 | End to end | `bash tests/e2e.sh` | yes | no |
 | A plugin that replaces WordPress's sitemaps | `bash tests/compat-seo.sh SLUG` | yes, and the network | no |
 | The backup, with the real `age` | `bash tests/backup-real.sh` | no (but `age`, installed) | no |
 | A restore, with the real tools | `bash tests/restore-real.sh` | yes, and `age` and `mkcert` | no |
 | `offprint collect`, with the real `age` | `bash tests/collect-real.sh` | no (but `age`, installed) | no |
+| The page's scripts, built again and opened with the real `age` | `bash tests/pigeonhole-real.sh` | no (but `age`, `npm` and the network) | no |
 | A running site | `bash tests/site.test.sh SITE_DIR` | yes (a set-up site) | no |
 
-The first fourteen need only bash, git, PHP, Perl and Node. The suites that publish use a stand-in `age`
+The first fifteen need only bash, git, PHP, Perl and Node. The suites that publish use a stand-in `age`
 (`tests/fixtures/age-standin`); `tests/backup-real.sh` runs the real one the same ways, and is run on the Mac before a
 change to the backup is merged. `tests/restore-real.sh` makes a real, throwaway site folder (`offprint new`,
 `offprint setup-wp`, a publish with `--no-push`) in the compose project `offprint-restore-real`, restores into it

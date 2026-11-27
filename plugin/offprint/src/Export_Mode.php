@@ -81,16 +81,25 @@ final class Export_Mode
         add_filter('wp_speculation_rules_configuration', '__return_null');
         add_filter('pre_http_request', array(self::class, 'refuse_public_host'), 10, 3);
         add_filter('emoji_svg_url', '__return_false');
-        // A static page cannot take a comment, so show no form and no comments feed link.
-        add_filter('comments_open', '__return_false', PHP_INT_MAX);
+        // A static page cannot take a comment, so show no form and no comments feed link. But for a site with a
+        // pigeonhole (Pigeonhole.php): there each post's own setting decides, and its form posts to the pigeonhole.
+        $comments = Pigeonhole::takes_comments();
+        if ($comments) {
+            Pigeonhole::boot_export();
+        } else {
+            add_filter('comments_open', '__return_false', PHP_INT_MAX);
+        }
         add_filter('pings_open', '__return_false', PHP_INT_MAX);
         add_filter('feed_links_show_comments_feed', '__return_false');
         add_filter('bloginfo_rss', array(self::class, 'feed_home_slash'), 10, 2);
 
-        // Late, so these also catch what themes and blocks add.
-        add_action('wp_enqueue_scripts', array(self::class, 'drop_comment_reply'), PHP_INT_MAX);
-        add_action('wp_print_scripts', array(self::class, 'drop_comment_reply'), 0);
-        add_action('wp_print_footer_scripts', array(self::class, 'drop_comment_reply'), 0);
+        // Late, so these also catch what themes and blocks add. (Kept where comments are taken: WordPress's
+        // comment-reply script is what moves the form under the comment a visitor replies to.)
+        if (!$comments) {
+            add_action('wp_enqueue_scripts', array(self::class, 'drop_comment_reply'), PHP_INT_MAX);
+            add_action('wp_print_scripts', array(self::class, 'drop_comment_reply'), 0);
+            add_action('wp_print_footer_scripts', array(self::class, 'drop_comment_reply'), 0);
+        }
         add_action('init', array(self::class, 'remove_head_links'), PHP_INT_MAX);
 
         // The local WordPress must not call the live site, or hold the cron lock the owner shares.

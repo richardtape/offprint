@@ -18,9 +18,14 @@
 #   CHECK_SITE_TO_COME_BYTES   and its size (at most 1048576): the limits count it as if it were there, so they hold for
 #                              what is published (one more file, of that size; in the archive, a stand-in of that size)
 # Each limit is 0 (or unset) for none.
+# And the site's pigeonhole (comments), from site.json, for the comment-form checks; both empty or unset for a site
+# with none:
+#   CHECK_SITE_PIGEONHOLE_PATH        its path
+#   CHECK_SITE_PIGEONHOLE_RECIPIENTS  its one or two age public keys, with a space between
 # Prints one line per failure and exits non-zero if there were any. A warning (from 80% of a limit) goes to stderr.
 # Exits 2, having read nothing, on a missing DIR, a missing or malformed host, or a malformed name or limit.
-# The address checks (links, images, forms, CSS, feeds) are in bin/check-site-addresses.php.
+# The address checks (links, images, forms, CSS, feeds) are in bin/check-site-addresses.php; the comment-form checks
+# (what a page's form carries is site.json's, the two scripts are the tool's own) in bin/check-site-pigeonhole.php.
 set -u
 # lib/site.sh first, found by the shell's own builtins: it makes the PATH safe to use before anything is looked up on it
 # (php, below, among others). Of the rest of it, only TOOL is used here.
@@ -182,6 +187,15 @@ fi
 # Addresses that lead to the admin, login, XML-RPC or REST API.
 addr="$(php "$here/check-site-addresses.php" . 2>&1)" || { bad "the address check could not run: $addr"; addr=""; }
 [ -z "$addr" ] || { printf '%s\n' "$addr"; fail=1; }
+
+# Comment forms. WordPress prints where a comment is posted and to whose keys it is encrypted, and serves the two
+# scripts that do it from the plugin copy it can write: with other keys a comment could be read by whoever holds them,
+# with another script by anyone. So each is compared with site.json's own and the tool's own (the script's header says
+# what that does and doesn't stop). Its settings are held to their patterns there, before anything is read.
+forms="$(php "$here/check-site-pigeonhole.php" . "$TOOL/plugin/offprint" 2>&1)"; forms_rc=$?
+if [ "$forms_rc" = 2 ]; then echo "bin/check-site: $forms" >&2; exit 2; fi
+if [ "$forms_rc" != 0 ]; then bad "the comment-form check could not run: $forms"; forms=""; fi
+[ -z "$forms" ] || { printf '%s\n' "$forms"; fail=1; }
 
 # Size: the whole, compressed; how many files; each file. (A name with a line end in it is refused above, and may be
 # counted twice here.) The file to come counts in each, as if it were there.

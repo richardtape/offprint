@@ -1174,6 +1174,53 @@ for bad_set in 'ADAPTER_DEPLOY_AGAIN=2' 'ADAPTER_DEPLOY_AGAIN=yes' 'ADAPTER_DEPL
   newcase; adapter x < <(printf 'adapter_confirm() { return 0; }\n%s\n' "$bad_set")
   pub; refused "an adapter.sh that sets $bad_set" "$(said x)its adapter.sh sets ADAPTER_DEPLOY_AGAIN to something that isn't 0 or 1."
 done
+# === ADAPTER_PIGEONHOLE: only a host that forwards the pigeonhole's path may show comment forms ===
+# A site with a "pigeonhole" block in site.json shows comment forms that post to one path of its own origin. Only a
+# web server of the owner's, set up to forward that path, takes such a post: on any other host the form would post to
+# nothing. Whether its host is one is the adapter's to say; no adapter of the tool's says so.
+PH_KEY="age1$(printf 'q%.0s' $(seq 1 58))"
+with_pigeonhole() {
+  sed "s#\"format\": 1,#\"format\": 1, \"pigeonhole\": {\"path\": \"/_pigeonhole\", \"recipients\": [\"$PH_KEY\"]},#" "$c/site.json" > "$c/site.json.new"
+  mv "$c/site.json.new" "$c/site.json"; commit "a pigeonhole block"
+}
+no_comments() { printf 'site.json has a "pigeonhole" block, but this site'"'"'s host can'"'"'t take comments: its adapter (%s) doesn'"'"'t say that it forwards the pigeonhole'"'"'s path (ADAPTER_PIGEONHOLE=1), so a comment form would post to nothing. Take the block out of site.json, or publish to a host that can; nothing was published.' "$1"; }
+newcase; adapter bare <<'A'
+# sets nothing
+A
+load 'echo "PH=$ADAPTER_PIGEONHOLE"'
+check "an adapter that sets nothing: ADAPTER_PIGEONHOLE is 0" "rc=0|PH=0" "$(printf '%s\n' "$out" | paste -sd'|' -)"
+newcase; adapter x <<'A'
+ADAPTER_PIGEONHOLE=1
+adapter_confirm() { return 0; }
+A
+load 'echo "PH=$ADAPTER_PIGEONHOLE"'
+check "an adapter that sets ADAPTER_PIGEONHOLE=1: it is 1" "rc=0|PH=1" "$(printf '%s\n' "$out" | paste -sd'|' -)"
+for bad_set in 'ADAPTER_PIGEONHOLE=2' 'ADAPTER_PIGEONHOLE=yes' 'ADAPTER_PIGEONHOLE=01' 'ADAPTER_PIGEONHOLE=' 'unset ADAPTER_PIGEONHOLE'; do
+  newcase; adapter x < <(printf 'adapter_confirm() { return 0; }\n%s\n' "$bad_set")
+  pub; refused "an adapter.sh that sets $bad_set" "$(said x)its adapter.sh sets ADAPTER_PIGEONHOLE to something that isn't 0 or 1."
+done
+newcase; adapter x <<'A'
+adapter_confirm() { return 0; }
+A
+with_pigeonhole; pub; refused "a pigeonhole block, and an adapter that doesn't say its host takes comments" "$(no_comments x)"
+newcase; adapter x <<'A'
+adapter_confirm() { return 0; }
+A
+with_pigeonhole; pub --dry-run; refused "... a dry run too" "$(no_comments x)"
+newcase; with_pigeonhole; pub; refused "a pigeonhole block, and no host at all (the adapter none)" "$(no_comments none)"
+newcase; adapter x <<'A'
+ADAPTER_PIGEONHOLE=1
+adapter_confirm() { return 0; }
+A
+with_pigeonhole; pub; t="a pigeonhole block, and an adapter that says its host takes comments"
+check "$t: the publish goes on, and ends well" 0 "$code"
+check "$t: a new commit" "$((commits0 + 1))" "$(git -C "$c" rev-list --count HEAD)"
+newcase; adapter x <<'A'
+adapter_confirm() { return 0; }
+A
+pub; t="no pigeonhole block, and an adapter that doesn't say: nothing to refuse"
+check "$t: the publish ends well" 0 "$code"
+
 # An adapter that deploys again: its deploy notes each commit it is given, fails while deploy_fails is there, and makes
 # the live site serve the publish (live) unless never_live is there; its confirm answers 0 once live, else 2 while away
 # is there, else 1.
@@ -1301,7 +1348,7 @@ rmdir "$c-tmp"
 # any 8 characters of it, in any file under the case's folder or the suite's TMPDIR, in any commit, or in what the
 # publish printed, is a leak (Review Focus 2). A self-check shows the stand-in node did print it, whole. Checks whose
 # text could hold it never show that text.
-TOKEN=CFTOKEN-do-not-print-0123456789; TOKEN_A="${TOKEN:0:15}"; TOKEN_B="${TOKEN:15}"
+TOKEN=CFTOKEN-do-not-print-q7Zx4Kp9Wm; TOKEN_A="${TOKEN:0:15}"; TOKEN_B="${TOKEN:15}"
 # The fake account id shares no 8 characters in a row with the token, so every piece of the token below is looked for.
 ACCOUNT=fedcba9876543210fedcba9876543210
 # TOKEN_PIECES: every 8 characters of the token in a row: each is looked for too, so no part of the token can leak

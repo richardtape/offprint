@@ -140,7 +140,6 @@ final class PigeonholeTest extends TestCase
             'a time as a string' => [$e(['ts' => (string) self::NOW]), 'its time is not a whole number'],
             'a time as a fraction' => [$e(['ts' => self::NOW + 0.5]), 'its time is not a whole number'],
             'a time 31 days ago' => [$e(['ts' => self::NOW - 31 * 86400]), 'it was sent more than 30 days ago'],
-            'a time six minutes ahead' => [$e(['ts' => self::NOW + 360]), 'its time is in the future'],
             'a page with no slash' => [$e(['page' => 'hello']), 'its page is not a path on the site'],
             'a page on another site' => [$e(['page' => 'https://www.example.com/']), 'its page is not a path on the site'],
             'a page starting with two slashes' => [$e(['page' => '//www.example.com/']), 'its page is not a path on the site'],
@@ -212,6 +211,19 @@ final class PigeonholeTest extends TestCase
         $r = self::check($twice);
         $this->assertFalse($r['ok']);
         $this->assertSame('it names a key twice', $r['why']);
+    }
+
+    public function testACommentFromAClockThatRunsAheadIsDatedNowNotRefused(): void
+    {
+        // The visitor was told it was sent. It is not dated in the future, and not lost.
+        foreach ([self::NOW + 301, self::NOW + 86400, 2147483647] as $ts) {
+            $r = self::check(self::envelope(['ts' => $ts]));
+            $this->assertTrue($r['ok'], $r['why'] ?? '');
+            $this->assertSame(self::NOW, json_decode($r['json'], true)['ts']);
+        }
+        // within the five minutes two clocks may differ by, its own time is kept
+        $r = self::check(self::envelope(['ts' => self::NOW + 300]));
+        $this->assertSame(self::NOW + 300, json_decode($r['json'], true)['ts']);
     }
 
     public function testTheEdgesOfTheTimeWindowPass(): void

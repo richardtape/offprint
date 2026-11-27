@@ -35,9 +35,11 @@ PASSED=0
 # Not lib/site.sh's dc (a site's own project, named after it, in its folder): this replaces it here. The throwaway
 # project: templates/compose.yaml with tests/compose.e2e.yaml over it, the temporary folder as its project directory
 # (so no relative path reaches this repo or a site), the fixture's values for the OFFPRINT_* variables. Caddy, the
-# only service with ports, is never started.
+# only service with ports, is never started. E2E_PIGEONHOLE_PATH and E2E_PIGEONHOLE_RECIPIENTS, when a suite has set
+# them, are the pigeonhole's two (WordPress takes them when its container is made: dc up -d wordpress, again).
 dc() {
   OFFPRINT_PUBLIC_ORIGIN="$SITE_PUBLIC_URL" OFFPRINT_LOCAL_HOST="$SITE_LOCAL_HOST" \
+  OFFPRINT_PIGEONHOLE_PATH="${E2E_PIGEONHOLE_PATH:-}" OFFPRINT_PIGEONHOLE_RECIPIENTS="${E2E_PIGEONHOLE_RECIPIENTS:-}" \
   OFFPRINT_TLS_PORT="$SITE_TLS_PORT" OFFPRINT_HTTP_PORT="$SITE_HTTP_PORT" OFFPRINT_TOOL="$TOOL" \
   docker compose -p "$PROJECT" --project-directory "$WORK" \
     -f "$TOOL/templates/compose.yaml" -f "$TOOL/tests/compose.e2e.yaml" "$@"
@@ -80,6 +82,13 @@ e2e_start() {
 
 # e2e_install: WordPress installed at the local host, its admin e2e-admin (user 1), with pretty permalinks.
 e2e_install() {
+  # The container is called healthy as soon as its web server answers, which can be a moment before the image's own
+  # start-up has put WordPress's files in place (seen under load: "'wp-config.php' not found"). Waited for, a minute
+  # at most.
+  local _i=0
+  while [ "$_i" -lt 60 ] && ! dc exec -T wordpress test -f /var/www/html/wp-config.php 2>/dev/null; do
+    _i=$((_i + 1)); perl -e 'select(undef,undef,undef,1)'
+  done
   ADMIN_PASSWORD=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24)
   wp core install --url="https://$LOCAL" --title="E2E" --admin_user=e2e-admin \
     --admin_password="$ADMIN_PASSWORD" --admin_email=e2e@example.com --skip-email >/dev/null || { echo "install failed"; exit 1; }

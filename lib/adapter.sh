@@ -60,6 +60,11 @@
 #                            nothing to push) whose live site doesn't serve it (adapter_confirm 1 or 2) then runs
 #                            adapter_deploy for the last commit, and asks the live site as after any deploy. 0: that
 #                            publish only asks, and fails. Default 0.
+#   ADAPTER_PIGEONHOLE       1 for a host that takes comments: a web server of the owner's that forwards the one path
+#                            a site's comment forms post to (site.json's pigeonhole.path) to that site's pigeonhole.
+#                            0: a host that only takes files, where such a form would post to nothing, so a publish of
+#                            a site whose site.json has a "pigeonhole" block is refused before anything is exported.
+#                            Default 0.
 #   adapter_validate         checks its ADAPTER_SET_* settings strictly: one line per problem, each starting
 #                            site.json: "adapter.KEY", and returns 1. Run before anything is exported. Default: 0.
 #   adapter_prepare DIR      writes its own ADAPTER_PREPARE_FILES (other than offprint.json) into DIR, the private copy
@@ -86,7 +91,7 @@
 #                            do, and returns 0 only when every line is ok. Default: says there is nothing to check.
 # bin/offprint runs adapter_validate before either, as a publish does.
 # Each name that isn't a function is checked once adapter.sh has run: the three lists must be plain file names, with no
-# name in two of them (in any letter case), ADAPTER_DEPLOY_AGAIN 0 or 1, the rest whole numbers.
+# name in two of them (in any letter case), ADAPTER_DEPLOY_AGAIN and ADAPTER_PIGEONHOLE 0 or 1, the rest whole numbers.
 
 OFFPRINT_ADAPTER_PROBLEM=""
 OFFPRINT_ADAPTER_DIR=""
@@ -355,6 +360,12 @@ EOT
        OFFPRINT_ADAPTER_PROBLEM="$_oa_said its adapter.sh sets ADAPTER_DEPLOY_AGAIN to something that isn't 0 or 1."
        return 2 ;;
   esac
+  case "${ADAPTER_PIGEONHOLE-}" in
+    0|1) ;;
+    *) offprint_adapter_cleanup
+       OFFPRINT_ADAPTER_PROBLEM="$_oa_said its adapter.sh sets ADAPTER_PIGEONHOLE to something that isn't 0 or 1."
+       return 2 ;;
+  esac
   return 0
 }
 
@@ -466,7 +477,7 @@ _offprint_adapter_defaults() {
   for _od_v in $(builtin compgen -A function adapter_); do unset -f "$_od_v"; done
   for _od_v in $(builtin compgen -v ADAPTER_); do case "$_od_v" in ADAPTER_NAME|ADAPTER_SET_*) ;; *) unset "$_od_v" ;; esac; done
   ADAPTER_PREPARE_FILES=""; ADAPTER_HOST_FILES=""; ADAPTER_HOST_SPECIAL_FILES=""; ADAPTER_MAX_FILE_BYTES=0; ADAPTER_MAX_FILES=0
-  ADAPTER_MAX_TOTAL_BYTES=0; ADAPTER_CONFIRM_SECONDS=240; ADAPTER_DEPLOY_AGAIN=0; ADAPTER_WHY=""; ADAPTER_PROBLEM=""
+  ADAPTER_MAX_TOTAL_BYTES=0; ADAPTER_CONFIRM_SECONDS=240; ADAPTER_DEPLOY_AGAIN=0; ADAPTER_PIGEONHOLE=0; ADAPTER_WHY=""; ADAPTER_PROBLEM=""
   adapter_validate() { return 0; }
   adapter_prepare() { return 0; }
   adapter_deploy() { return 0; }

@@ -10,7 +10,7 @@
  *
  * What is opened is whatever a stranger sent, so nothing in it is trusted: it must be exactly the size a submission
  * has, one JSON object with exactly the keys of its kind, each of its type and within its length, with no control
- * character, sent neither long ago nor in the future (a comment is dated from it), and no longer written out than it
+ * character, not sent long ago (and one from a clock that runs ahead is dated now), and no longer written out than it
  * was sent (so that what reads the line next, with the same limit, never meets one it can't take). A reason is one of the fixed
  * texts below and never repeats anything that was sent: reasons go to a terminal and to a file beside the kept
  * submission. No WordPress function is used, so this is unit-tested (tests/php/PigeonholeTest.php).
@@ -22,7 +22,11 @@ declare(strict_types=1);
 const OFFPRINT_PIGEONHOLE_PLAIN_BYTES = 8192;
 /** A submission older than this is refused: its sender has long stopped waiting, and its date would mislead. */
 const OFFPRINT_PIGEONHOLE_MAX_AGE = 30 * 86400;
-/** How far ahead of this Mac's clock a sender's may be. A comment is dated from it, so it must not be post-dated. */
+/**
+ * How far ahead of this Mac's clock a sender's may be before its time is taken for wrong. A comment is dated from it,
+ * so it must not be post-dated: one from further ahead is dated now, when it was checked. It is not refused: the
+ * visitor was told it was sent, and a clock that runs fast is no reason to lose what they wrote.
+ */
 const OFFPRINT_PIGEONHOLE_MAX_AHEAD = 300;
 /** Under this many seconds between the form being touched and its sending, the sorter says spam. */
 const OFFPRINT_PIGEONHOLE_MIN_SECONDS = 3;
@@ -77,7 +81,7 @@ function offprint_pigeonhole_check(string $plain, int $now): array
         return $no('it was sent more than 30 days ago');
     }
     if ($d['ts'] > $now + OFFPRINT_PIGEONHOLE_MAX_AHEAD) {
-        return $no('its time is in the future');
+        $d['ts'] = $now;
     }
     // one slash, then anything printable: a path of the site's own, never another origin (//host) or a whole address
     if (!is_string($d['page']) || strlen($d['page']) > 500 || preg_match('/\A\/(?!\/)[^\p{Cc}]*\z/Du', $d['page']) !== 1) {

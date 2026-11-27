@@ -82,13 +82,18 @@ final class Exporter
      * @param string $local_host   The host WordPress really answers to (the site's local host).
      * @param string $secret       Export mode's secret. Neither may appear in a written file.
      * @param int    $max_requests The most requests one export makes.
+     * @param string $accepted_post The address of the one form that works on the static site though nothing there
+     *                              takes a form (a site's pigeonhole: its comment form, which can't post by itself,
+     *                              method "dialog", and whose script sends what it holds), or none. That form gets
+     *                              no warning; one that would post or get that address still does.
      */
     public function __construct(
         string $public_origin,
         private Fetcher $fetcher,
         string $local_host,
         string $secret,
-        private int $max_requests = 20000
+        private int $max_requests = 20000,
+        private string $accepted_post = ''
     ) {
         $this->public_origin = rtrim($public_origin, '/');
         $this->public_host = strtolower((string) parse_url($this->public_origin, PHP_URL_HOST));
@@ -367,6 +372,9 @@ final class Exporter
     {
         $here = [];
         foreach ($forms as ['action' => $action, 'method' => $method]) {
+            if ($method === 'dialog' && $this->accepted_post !== '' && $action === $this->accepted_post) {
+                continue;   // it works on the static site: its script sends what it holds
+            }
             $here["$method $action"] = $action;
         }
         foreach ($here as $form => $action) {

@@ -8,7 +8,8 @@
 // host; links to other sites are allowed. Text, <code>/<pre> and .js files are not checked.
 // Both hosts come from the environment only (bin/check-site needs them; bin/publish and offprint check set them from
 // site.json), and each must look like a hostname, or this exits 2 having read nothing.
-// A file the HTML or XML parser could not read completely is itself reported (fail closed).
+// A file the HTML or XML parser could not read completely is itself reported (fail closed), and so is a page or a
+// stylesheet written in UTF-16 or UTF-32 (by the mark at its start), which a browser reads and nothing here can.
 
 // A finite limit: anything that blows up (a file built to) fails this check instead of exhausting the Mac.
 ini_set( 'memory_limit', '512M' );
@@ -255,6 +256,14 @@ foreach ( $it as $file ) {
 	$ctx  = array( 'dir' => '.' === $d ? '/' : '/' . $d . '/', 'host' => null );
 	$text = file_get_contents( $file->getPathname() );
 	if ( false === $text ) { $found[ $rel . ': could not be read' ] = true; continue; }
+	// A byte order mark of UTF-16 or UTF-32: a browser decodes the file by it, above anything else that names an
+	// encoding. Its links, a host name in it, a form: none shows in its bytes to this check, to bin/check-site's search
+	// for the local host, or to the comment-form check. WordPress writes UTF-8, so such a file is refused, not read.
+	// (But a feed or sitemap: the XML parser reads those in the encoding they declare, and they are checked below.)
+	if ( 'xml' !== $kind && 1 === preg_match( '/\A(?:\xFF\xFE|\xFE\xFF|\x00\x00\xFE\xFF)/', $text ) ) {
+		$found[ $rel . ': is written in UTF-16 or UTF-32, which the checks can\'t read (WordPress writes UTF-8)' ] = true;
+		continue;
+	}
 	$hits = array(); $fatal = null;
 	if ( 'xml' === $kind && '' === trim( $text ) ) { $found[ $rel . ': is empty' ] = true; continue; }
 	// A DOCTYPE in the prolog is refused unread, on the raw bytes; any other encoding is caught by xml_scan().

@@ -50,7 +50,7 @@ final class Command
         $host_header = $local_host . (isset($home['port']) ? ':' . $home['port'] : '');
         $secret = Export_Mode::secret();
 
-        $exporter = new Exporter($public, new Fetch(self::FETCH_BASE, $host_header, $secret), $local_host, $secret);
+        $exporter = new Exporter($public, new Fetch(self::FETCH_BASE, $host_header, $secret), $local_host, $secret, 20000, Pigeonhole::accepted_post($public));
         $report = $exporter->run($assoc_args['out'], Seeds::from_wordpress($public));
 
         // One stream, in this order, so a caller reading through `docker compose exec` sees it so.

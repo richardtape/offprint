@@ -595,6 +595,22 @@ ENV OFFPRINT_TOOL=$phystool"
   if [ "$(cat "$tmp/docker.rec$n")" = "$want_rec" ]; then ok "[$t] dc runs docker compose with the exact argv and the five variables"; else bad "[$t] dc argv/env: $(cat "$tmp/docker.rec$n" 2>&1)"; fi
   if contains "$sh_out" "rc=7" && contains "$sh_out" "leak=[]"; then ok "[$t] dc returns docker's exit code and leaves the variables unexported in the caller"; else bad "[$t] dc rc/leak ($sh_out)"; fi
 
+  # dc hands compose the pigeonhole's two values too (the compose file makes constants of them in WordPress), and
+  # empty ones for a site with no block, whatever the environment held.
+  for ph_case in block none; do
+    newsite; mkdir -p "$tmp/bin$n"
+    if [ "$ph_case" = block ]; then with "\"pigeonhole\":{\"path\":\"/_pigeonhole\",\"recipients\":[\"$Q62\",\"$P62\"]}"; ph_want="/_pigeonhole|$Q62 $P62"
+    else put "{$base}"; ph_want="|"; fi
+    cat > "$tmp/bin$n/docker" <<STUB
+#!/bin/sh
+[ "\$1" = compose ] || exit 0
+printf '%s|%s' "\${OFFPRINT_PIGEONHOLE_PATH-unset}" "\${OFFPRINT_PIGEONHOLE_RECIPIENTS-unset}" > "$tmp/docker.ph$n"
+STUB
+    chmod +x "$tmp/bin$n/docker"
+    sh_out="$(cd / && PATH="$tmp/bin$n:$PATH" OFFPRINT_PIGEONHOLE_PATH=/inherited OFFPRINT_PIGEONHOLE_RECIPIENTS=inherited OFFPRINT_SITE="$site" "$B" -c ". '$root/lib/site.sh'; offprint_find_site; offprint_load_site; dc up -d" 2>&1)"
+    if [ "$(cat "$tmp/docker.ph$n" 2>/dev/null)" = "$ph_want" ]; then ok "[$t] dc hands compose the pigeonhole's path and recipients ($ph_case)"; else bad "[$t] dc pigeonhole env, $ph_case: $(cat "$tmp/docker.ph$n" 2>&1) $sh_out"; fi
+  done
+
   # ---- the PATH clean-up: offprint_clean_path, and the site folder's entries ----
   # An empty entry, or one that isn't an absolute path, is whatever folder a command runs in (wp-content/, say); an
   # entry in a site folder is one WordPress can write. Each is left out, in one line on stderr, and PATH is never left

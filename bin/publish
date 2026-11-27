@@ -342,6 +342,15 @@ if [ "$vrc" -ne 0 ]; then
   first="$(printf '%s\n' "$problems" | grep -m1 . | printable | cut -c1-300)"; first="${first%.}"
   fail "site.json has a problem: ${first:-the adapter $ADAPTER_NAME refused its settings and said nothing}; nothing was published."
 fi
+# A site with a pigeonhole shows comment forms that post to one path of its own origin. Only a web server of the
+# owner's that forwards that path takes such a post, and whether the host is one is its adapter's to say: on any other
+# the form would post to nothing, and a visitor's comment be lost with no word to anyone. Refused here, before
+# anything is asked of Docker or exported (a dry run too).
+if [ -n "$SITE_PIGEONHOLE_PATH" ] && [ "$ADAPTER_PIGEONHOLE" != 1 ]; then
+  FINAL=1
+  status failed "site.json has a \"pigeonhole\" block, but this site's host can't take comments: its adapter ($ADAPTER_NAME) doesn't say that it forwards the pigeonhole's path (ADAPTER_PIGEONHOLE=1), so a comment form would post to nothing. Take the block out of site.json, or publish to a host that can; nothing was published." final
+  exit 2
+fi
 # The publish's id goes into offprint.json, when the publish writes one, as 40 hex digits (what the default confirm
 # reads): a repository whose ids are longer (SHA-256: git's id of the empty tree, worked out above, has 64) is refused
 # here, before anything is exported. (The id itself is checked again once it is made: see "The publish's id" below.)
@@ -532,6 +541,7 @@ CHECK_SITE_HOST="$SITE_PUBLIC_HOST" CHECK_SITE_LOCAL_HOST="$SITE_LOCAL_HOST" \
   CHECK_SITE_SPECIAL="$ADAPTER_HOST_SPECIAL_FILES" CHECK_SITE_TO_COME="$to_come" CHECK_SITE_TO_COME_BYTES="$to_come_bytes" \
   CHECK_SITE_MAX_BYTES="$ADAPTER_MAX_TOTAL_BYTES" CHECK_SITE_MAX_FILES="$ADAPTER_MAX_FILES" \
   CHECK_SITE_MAX_FILE_BYTES="$ADAPTER_MAX_FILE_BYTES" \
+  CHECK_SITE_PIGEONHOLE_PATH="$SITE_PIGEONHOLE_PATH" CHECK_SITE_PIGEONHOLE_RECIPIENTS="$SITE_PIGEONHOLE_RECIPIENTS" \
   /bin/bash "$TOOL/bin/check-site" "$SITE/site.new" > "$VAR/check.out" 2> "$VAR/check.err" < /dev/null &
 cpid=$!
 waited=0

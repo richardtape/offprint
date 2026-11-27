@@ -4,3 +4,5 @@
 /.phpunit.result.cache
 # the tool repo's own working notes, never committed
 /.superpowers/
+# what npm ci puts beside the browser script's sources: never committed
+/pigeonhole/browser/node_modules/

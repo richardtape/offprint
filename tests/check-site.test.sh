@@ -163,6 +163,23 @@ passes "a feed whose post holds <!DOCTYPE svg …> in CDATA"
 newsite; printf '<?xml version="1.0"?>\n<!-- <rss> -->\n<!DOCTYPE rss>\n<rss><channel><link>https://www.example.com/</link></channel></rss>\n' > "$site/feed/index.xml"
 fails "a DOCTYPE after a comment in the prolog" "feed/index.xml: has a DOCTYPE or ENTITY declaration"
 
+# --- a page or stylesheet in UTF-16 or UTF-32 (a feed is read by the XML parser, in its own encoding: see above): a browser reads it (the mark at its start outranks everything
+# else that names an encoding), and none of the checks here can: no link, no host name, no form shows in its bytes ---
+utf16() { printf '%s' "$1" | iconv -f UTF-8 -t "$2"; }
+not_utf8="is written in UTF-16 or UTF-32, which the checks can't read (WordPress writes UTF-8)"
+newsite; { printf '\377\376'; utf16 '<html><body><a href="/wp-admin/">x</a> mysite.test</body></html>' UTF-16LE; } > "$site/a.html"
+fails "a page in UTF-16, little end first" "a.html: $not_utf8"
+newsite; { printf '\376\377'; utf16 '<html><body><a href="/wp-admin/">x</a></body></html>' UTF-16BE; } > "$site/a.html"
+fails "a page in UTF-16, big end first" "a.html: $not_utf8"
+newsite; { printf '\377\376\000\000'; utf16 '<html><body><a href="/wp-admin/">x</a></body></html>' UTF-32LE; } > "$site/a.html"
+fails "a page in UTF-32, little end first" "a.html: $not_utf8"
+newsite; { printf '\000\000\376\377'; utf16 '<html><body><a href="/wp-admin/">x</a></body></html>' UTF-32BE; } > "$site/a.html"
+fails "a page in UTF-32, big end first" "a.html: $not_utf8"
+newsite; { printf '\377\376'; utf16 'a { background: url(/wp-admin/x.png) }' UTF-16LE; } > "$site/a.css"
+fails "a stylesheet in UTF-16" "a.css: $not_utf8"
+newsite; printf '\357\273\277<html><body><p>Hello</p></body></html>' > "$site/a.html"; passes "a page with UTF-8's own mark at its start"
+newsite; printf '\377\376\001\002' > "$site/a.bin"; passes "a file that is no page, starting with the same two bytes"
+
 # --- no single page or feed over 32 MB: the parsers would take gigabytes ---
 newsite; dd if=/dev/null of="$site/big.html" bs=1 count=0 seek=34000000 2>/dev/null; fails "an HTML file over 32 MB" "big.html: is larger than 32 MB; that is not a page"
 newsite; dd if=/dev/null of="$site/wp-sitemap.xml" bs=1 count=0 seek=34000000 2>/dev/null; fails "an XML file over 32 MB" "wp-sitemap.xml: is larger than 32 MB; that is not a page"
@@ -480,6 +497,136 @@ newsite; mkdir "$tmp/tcdir"; TMPDIR="$tmp/tcdir" CHECK_SITE_MAX_BYTES=100000 tc 
 check_left="$(ls -A "$tmp/tcdir")"
 if [ "$code" -eq 0 ] && [ -z "$check_left" ]; then ok "to come: the stand-in measured in the archive is removed (nothing left in TMPDIR)"; else bad "to come, TMPDIR (exit $code, left '$check_left')"; fi
 
+# --- comment forms (a site's pigeonhole): what a page carries is site.json's, and the scripts are the tool's -------------
+# WordPress prints a page's block (where a comment is posted, and to whose keys it is encrypted) from values it took
+# when its container was made; the two scripts are served from the plugin copy it can write. bin/publish passes
+# site.json's own path and keys (CHECK_SITE_PIGEONHOLE_PATH, CHECK_SITE_PIGEONHOLE_RECIPIENTS), and the export is
+# compared with them, and with the tool's own scripts.
+PHQ="age1$(printf 'q%.0s' $(seq 1 58))"; PHP2="age1$(printf 'p%.0s' $(seq 1 58))"
+ph_block() { printf '<script type="application/json" id="offprint-pigeonhole">{"path":"%s","recipients":[%s],"bits":%s}</script>' "${1:-/_pigeonhole}" "${2:-\"$PHQ\",\"$PHP2\"}" "${3:-18}"; }
+# the comment form as the plugin prints it: marked, unable to post by itself (method "dialog"), its hidden field in it
+ph_form='<form action="/_pigeonhole" method="dialog" data-offprint-pigeonhole="1"><textarea name="comment"></textarea><input type="text" name="offprint_hp" value=""></form>'
+# ph_site [BODY]: a site with a post whose page holds BODY (a good block and the form, unless given), and both scripts
+ph_site() {
+  newsite; mkdir -p "$site/hello" "$site/wp-content/mu-plugins/offprint"
+  printf '<html><body><p>A post</p>%s</body></html>\n' "${1-$ph_form$(ph_block)}" > "$site/hello/index.html"
+  cp "$root/plugin/offprint/pigeonhole.js" "$root/plugin/offprint/pigeonhole-loader.js" "$site/wp-content/mu-plugins/offprint/"
+}
+ph_on() { export CHECK_SITE_PIGEONHOLE_PATH=/_pigeonhole CHECK_SITE_PIGEONHOLE_RECIPIENTS="$PHQ $PHP2"; }
+ph_off() { unset CHECK_SITE_PIGEONHOLE_PATH CHECK_SITE_PIGEONHOLE_RECIPIENTS; }
+remake='WordPress takes these when its container is made: run offprint compose up -d, then publish again.'
+
+ph_on
+ph_site; passes "pigeonhole: a page with the form, site.json's block and the tool's two scripts"
+ph_site ""; passes "pigeonhole: a site with one, and a page with no form and no block"
+ph_site "$(ph_block)"; passes "pigeonhole: a block and no form (a theme with no comment form): nothing to send, nothing wrong"
+ph_site "$ph_form$(ph_block /_pigeonhole "\"$PHQ\"")"; fails "pigeonhole: a block with one of site.json's two keys" "hello/index.html: its comment form's settings (the offprint-pigeonhole block) are not right: its keys are not site.json's. $remake"
+ph_site "$ph_form$(ph_block /_pigeonhole "\"$PHP2\",\"$PHQ\"")"; fails "pigeonhole: the two keys the other way round" "its keys are not site.json's"
+ph_site "$ph_form$(ph_block /_pigeonhole "\"$PHQ\",\"age1$(printf 'z%.0s' $(seq 1 58))\"")"; fails "pigeonhole: a key that is not site.json's" "its keys are not site.json's"
+ph_site "$ph_form$(ph_block /_pigeonhole "\"$PHQ\",\"$PHP2\",\"age1$(printf 'z%.0s' $(seq 1 58))\"")"; fails "pigeonhole: a third key" "its keys are not site.json's"
+ph_site "$ph_form<script type=\"application/json\" id=\"offprint-pigeonhole\">{\"path\":\"/_pigeonhole\",\"recipients\":{\"0\":\"$PHQ\",\"1\":\"$PHP2\"},\"bits\":18}</script>"
+fails "pigeonhole: the keys as an object, not a list" "its keys are not site.json's"
+ph_site "$ph_form$(ph_block /elsewhere)"; fails "pigeonhole: a block with another path" "its path is not site.json's. $remake"
+ph_site "$ph_form$(ph_block /_pigeonhole "\"$PHQ\",\"$PHP2\"" 1)"; fails "pigeonhole: a block asking for less proof of work" "its proof of work is not this Offprint's"
+ph_site "$ph_form$(ph_block /_pigeonhole "\"$PHQ\",\"$PHP2\"" '"18"')"; fails "pigeonhole: the proof of work as text" "its proof of work is not this Offprint's"
+ph_site "$ph_form<script type=\"application/json\" id=\"offprint-pigeonhole\">{\"path\":\"/_pigeonhole\",\"recipients\":[\"$PHQ\",\"$PHP2\"],\"bits\":18,\"extra\":1}</script>"
+fails "pigeonhole: a block with a fourth key" "it does not hold exactly a path, the recipients and the proof of work"
+ph_site "$ph_form<script type=\"application/json\" id=\"offprint-pigeonhole\">{\"path\":\"/elsewhere\",\"path\":\"/_pigeonhole\",\"recipients\":[\"$PHQ\",\"$PHP2\"],\"bits\":18}</script>"
+fails "pigeonhole: a block that names its path twice" "it does not hold exactly a path, the recipients and the proof of work"
+ph_site "$ph_form<script type=\"application/json\" id=\"offprint-pigeonhole\">{\"recipients\":[\"$PHQ\",\"$PHP2\"],\"path\":\"/_pigeonhole\",\"bits\":18}</script>"
+fails "pigeonhole: a block with its keys in another order" "it does not hold exactly a path, the recipients and the proof of work"
+ph_site "$ph_form<script type=\"application/json\" id=\"offprint-pigeonhole\">not json</script>"; fails "pigeonhole: a block that is not JSON" "it is not JSON"
+ph_site "$ph_form<script type=\"application/json\" id=\"offprint-pigeonhole\">[1]</script>"; fails "pigeonhole: a block that is a list" "it is not a JSON object"
+ph_site "$ph_form<script id=\"offprint-pigeonhole\">{}</script>"; fails "pigeonhole: a block that is a script a browser runs" "it is not a JSON script element"
+ph_site "$ph_form<div id=\"offprint-pigeonhole\">x</div>"; fails "pigeonhole: something else with the block's id" "it is not a JSON script element"
+ph_site "$ph_form$(ph_block)$(ph_block)"; fails "pigeonhole: the block twice" "hello/index.html: carries a comment form's settings (the offprint-pigeonhole block) more than once; a page has one."
+ph_site "$ph_form$(ph_block)$(ph_block /elsewhere)"; fails "pigeonhole: a right block and a wrong one" "more than once"
+ph_site "$ph_form<script type=\"application/json\" id=\"offprint&#45;pigeonhole\">{\"path\":\"/elsewhere\",\"recipients\":[\"$PHQ\",\"$PHP2\"],\"bits\":18}</script>"
+fails "pigeonhole: a wrong block whose id is written with an entity" "its path is not site.json's"
+ph_site "$ph_form<SCRIPT TYPE=\"Application/JSON\" ID=\"offprint-pigeonhole\">{\"path\":\"/_pigeonhole\",\"recipients\":[\"$PHQ\",\"$PHP2\"],\"bits\":18}</SCRIPT>"
+passes "pigeonhole: the block's tag and type in capitals"
+# The form itself: only as the plugin prints it (it can't post by itself), once, on a page with the block.
+ph_site "$ph_form"; fails "pigeonhole: the form and no block" "hello/index.html: has a pigeonhole's comment form, but not the block that says whose keys a comment is encrypted to; a comment sent from it would go nowhere."
+not_as_printed="hello/index.html: its comment form is not as this Offprint prints it:"
+ph_site "<form action=\"/_pigeonhole\" method=\"post\" data-offprint-pigeonhole=\"1\"><input name=\"offprint_hp\"></form>$(ph_block)"
+fails "pigeonhole: the form as WordPress writes it, able to post" "$not_as_printed it could post what a visitor typed, readable, should the script not run (its method is not \"dialog\")."
+ph_site "<form action=\"/_pigeonhole\" data-offprint-pigeonhole=\"1\"><input name=\"offprint_hp\"></form>$(ph_block)"
+fails "pigeonhole: the form with no method at all (a browser would get the path)" "its method is not \"dialog\""
+ph_site "<form action=\"/_pigeonhole\" method=\"dialog\"><input name=\"offprint_hp\"></form>$(ph_block)"
+fails "pigeonhole: the form with its hidden field and no mark" "$not_as_printed it is not marked as one."
+ph_site "<form action=\"/_pigeonhole?x=1\" method=\"dialog\" data-offprint-pigeonhole=\"1\"></form>$(ph_block)"
+fails "pigeonhole: the form with something after the path in its address" "$not_as_printed its address is not the pigeonhole's path."
+ph_site "<form action=\"/elsewhere\" method=\"dialog\" data-offprint-pigeonhole=\"1\"></form>$(ph_block)"
+fails "pigeonhole: the form with another address" "its address is not the pigeonhole's path"
+ph_site "<form action=\"/_pigeonhole\" method=\"dialog\" data-offprint-pigeonhole=\"1\"><button formmethod=\"post\">Send</button></form>$(ph_block)"
+fails "pigeonhole: the form with a button that posts it" "$not_as_printed a button in it sends it another way."
+ph_site "<form action=\"/_pigeonhole\" method=\"dialog\" data-offprint-pigeonhole=\"1\"><button formaction=\"https://other.example.com/\">Send</button></form>$(ph_block)"
+fails "pigeonhole: the form with a button that sends it elsewhere" "a button in it sends it another way"
+ph_site "$ph_form$ph_form$(ph_block)"; fails "pigeonhole: the form twice" "hello/index.html: has a pigeonhole's comment form more than once; a page has one."
+ph_site "<div data-offprint-pigeonhole=\"1\"></div>$(ph_block)"; fails "pigeonhole: the mark on something that is no form" "its mark or its hidden field is not in a form"
+ph_site "<input name=\"offprint_hp\">$(ph_block)"; fails "pigeonhole: the hidden field outside any form" "its mark or its hidden field is not in a form"
+ph_site "<FORM ACTION=\"/_pigeonhole\" METHOD=\" Dialog \" DATA-OFFPRINT-PIGEONHOLE=\"1\"><INPUT NAME=\"offprint_hp\"></FORM>$(ph_block)"
+passes "pigeonhole: the form's tag and method in capitals"
+# Nothing else sends to the path, however its address is written: it would post what a visitor typed, readable.
+sends="hello/index.html: has a form or a button that sends to /_pigeonhole, the pigeonhole's path, and is not the comment form this Offprint prints; it would post what a visitor typed, readable."
+ph_site '<form action="/_pigeonhole" method="post"></form>'; fails "pigeonhole: a form that posts to the path, and nothing else on the page" "$sends"
+ph_site "$ph_form<form action=\"/_pigeonhole\" method=\"post\"></form>$(ph_block)"; fails "pigeonhole: a second form that posts to the path, beside the right one" "$sends"
+ph_site "<p><form action=\"/_pigeonhole\" method=\"post\"><textarea name=\"comment\"></textarea></form></p>$ph_form$(ph_block)"; fails "pigeonhole: a form that posts to the path, before the right one" "$sends"
+ph_site '<form action="/_pigeonhole"></form>'; fails "pigeonhole: a form that gets the path" "$sends"
+ph_site '<form><button formmethod="post" formaction="/_pigeonhole">x</button></form>'; fails "pigeonhole: a button that posts its form to the path" "$sends"
+ph_site '<form><input type="image" formaction="/_pigeonhole"></form>'; fails "pigeonhole: an image button that sends its form to the path" "$sends"
+for a in 'https://www.example.com/_pigeonhole' '//WWW.EXAMPLE.COM/_pigeonhole?x=1#y' '/%5Fpigeonhole/' '../_pigeonhole' './../_pigeonhole' '/a/../_pigeonhole' '/a/b/../../_pigeonhole/' 'https:/_pigeonhole' 'https:../_pigeonhole' '/_PIGEONHOLE' '/_pigeonhole;x' '/_pigeonhole/;x=1?y' '\_pigeonhole' 'https://www.example.com:443/_pigeonhole' 'https://user@www.example.com./_pigeonhole' ' /_pige	onhole '; do
+  ph_site "<form action=\"$a\" method=\"post\"></form>"; fails "pigeonhole: a form posting to the path written as $a" "$sends"
+done
+ph_site '<base href="/"><form action="_pigeonhole" method="post"></form>'; fails "pigeonhole: a form posting to the path through the page's <base>" "$sends"
+ph_site '<base href="https://www.example.com/x/y"><form action="../_pigeonhole" method="post"></form>'; fails "pigeonhole: ... a <base> with a path of its own" "$sends"
+newsite; mkdir -p "$site/wp-content/mu-plugins/offprint"; echo '<html><body><form action="_pigeonhole" method="post"></form></body></html>' > "$site/index.html"
+fails "pigeonhole: a form on the home page posting to the path by its name alone" "index.html: has a form or a button that sends to /_pigeonhole"
+for a in '/_pigeonhole-not' '/a/_pigeonhole' '_pigeonhole' '/_pigeonhol' 'https://other.example.com/_pigeonhole' 'mailto:_pigeonhole' '#_pigeonhole' '?_pigeonhole' ''; do
+  ph_site "<form action=\"$a\" method=\"post\"></form>"; passes "pigeonhole: a form posting somewhere else ($a)"
+done
+ph_site '<base href="https://other.example.com/"><form action="/_pigeonhole" method="post"></form>'; passes "pigeonhole: a form posting to that path on another site, through <base>"
+# A page that is not a .html file: read all the same.
+ph_site ""; printf '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body>%s%s</body></html>' "$ph_form" "$(ph_block /elsewhere)" > "$site/hello/c.xml"
+fails "pigeonhole: a wrong block in a page that is an .xml file" "hello/c.xml: its comment form's settings (the offprint-pigeonhole block) are not right: its path is not site.json's"
+ph_site ""; printf '<svg xmlns="http://www.w3.org/2000/svg"><foreignObject><form xmlns="http://www.w3.org/1999/xhtml" action="/_pigeonhole" method="post"></form></foreignObject></svg>' > "$site/hello/c.svg"
+fails "pigeonhole: a form posting to the path inside an .svg file" "hello/c.svg: has a form or a button that sends to /_pigeonhole"
+# the two scripts
+ph_site; echo '// more' >> "$site/wp-content/mu-plugins/offprint/pigeonhole.js"
+fails "pigeonhole: the script that sends a comment, changed" "wp-content/mu-plugins/offprint/pigeonhole.js: is not this Offprint's own script (plugin/offprint/pigeonhole.js), byte for byte"
+ph_site; echo 'fetch("https://other.example.com/")' > "$site/wp-content/mu-plugins/offprint/pigeonhole-loader.js"
+fails "pigeonhole: the loader, replaced" "wp-content/mu-plugins/offprint/pigeonhole-loader.js: is not this Offprint's own script"
+ph_site; sz=$(wc -c < "$root/plugin/offprint/pigeonhole-loader.js" | tr -d ' '); head -c "$sz" /dev/zero | tr '\0' 'x' > "$site/wp-content/mu-plugins/offprint/pigeonhole-loader.js"
+fails "pigeonhole: the loader, other bytes of the same length" "pigeonhole-loader.js: is not this Offprint's own script"
+ph_site; rm "$site/wp-content/mu-plugins/offprint/pigeonhole.js"
+fails "pigeonhole: a page with the block, and no script that sends" "hello/index.html: carries a comment form's settings, but the export has no wp-content/mu-plugins/offprint/pigeonhole.js, the script that sends a comment."
+ph_site; rm "$site/wp-content/mu-plugins/offprint/pigeonhole-loader.js"
+fails "pigeonhole: a page with the block, and no loader" "but the export has no wp-content/mu-plugins/offprint/pigeonhole-loader.js"
+ph_site ""; rm -r "$site/wp-content"; passes "pigeonhole: no page with the block, and no scripts: nothing loads them"
+ph_site; rm "$site/wp-content/mu-plugins/offprint/pigeonhole.js"; mkdir "$site/wp-content/mu-plugins/offprint/pigeonhole.js"
+fails "pigeonhole: a folder where the script should be" "pigeonhole.js: is not this Offprint's own script"
+# a site with no pigeonhole
+ph_off
+ph_site; fails "no pigeonhole in site.json: a page with a block" "hello/index.html: carries a comment form's settings (the offprint-pigeonhole block), but site.json has no \"pigeonhole\" block. $remake"
+ph_site '<form action="/_pigeonhole" method="post"></form>'; passes "no pigeonhole in site.json: a form posting to some path is only a form (the exporter warns of it)"
+ph_site "$ph_form"; fails "no pigeonhole in site.json: a page with a pigeonhole's comment form" "hello/index.html: has a pigeonhole's comment form, but site.json has no \"pigeonhole\" block. $remake"
+ph_site '<form method="post" action="/x"><input name="offprint_hp"></form>'; fails "no pigeonhole in site.json: a form with the hidden field (a container made when there was one)" "has a pigeonhole's comment form, but site.json has no"
+ph_site ""; echo '// more' >> "$site/wp-content/mu-plugins/offprint/pigeonhole.js"
+fails "no pigeonhole in site.json: the script, changed, is still refused" "pigeonhole.js: is not this Offprint's own script"
+# its settings come whole, or the check reads nothing
+bad_ph() {  # description; the two variables are set
+  ph_site; run
+  if [ "$code" -eq 2 ] && [ -z "$out" ] && printf '%s' "$err" | grep -qF "CHECK_SITE_PIGEONHOLE_PATH and CHECK_SITE_PIGEONHOLE_RECIPIENTS must be site.json's pigeonhole path and its one or two age public keys (or both empty)"; then ok "exit 2: $1"; else bad "exit 2: $1 (exit $code, out: $out, err: $err)"; fi
+}
+export CHECK_SITE_PIGEONHOLE_PATH=/_pigeonhole CHECK_SITE_PIGEONHOLE_RECIPIENTS=""; bad_ph "pigeonhole: a path and no keys"
+export CHECK_SITE_PIGEONHOLE_PATH="" CHECK_SITE_PIGEONHOLE_RECIPIENTS="$PHQ"; bad_ph "pigeonhole: keys and no path"
+export CHECK_SITE_PIGEONHOLE_PATH="/a/b" CHECK_SITE_PIGEONHOLE_RECIPIENTS="$PHQ"; bad_ph "pigeonhole: a path of two names"
+export CHECK_SITE_PIGEONHOLE_PATH='/a$(id)' CHECK_SITE_PIGEONHOLE_RECIPIENTS="$PHQ"; bad_ph "pigeonhole: a path with a command in it"
+export CHECK_SITE_PIGEONHOLE_PATH=/_pigeonhole CHECK_SITE_PIGEONHOLE_RECIPIENTS="$PHQ $PHP2 $PHQ"; bad_ph "pigeonhole: three keys"
+export CHECK_SITE_PIGEONHOLE_PATH=/_pigeonhole CHECK_SITE_PIGEONHOLE_RECIPIENTS="AGE-SECRET-KEY-1$(printf 'Q%.0s' $(seq 1 58))"; bad_ph "pigeonhole: a private key"
+if ! printf '%s' "$err$out" | grep -q 'AGE-SECRET-KEY'; then ok "pigeonhole: a private key given as a recipient is not repeated"; else bad "pigeonhole: a private key was echoed"; fi
+ph_off
+unset -f bad_ph
 # --- the PATH clean-up (lib/site.sh, sourced first): look-alikes WordPress could put in wp-content/ never run ---
 # bin/check-site run by itself, from inside a site folder's wp-content/, which holds look-alikes of bash, dirname, php,
 # mktemp, git, docker, curl, readlink and env (each noting that it ran), with the PATH reaching there through . first,

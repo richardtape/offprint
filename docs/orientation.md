@@ -145,10 +145,13 @@ during a publish; Caddy is documented first.
 **Pigeonhole: comments on a static site.** Approved by the owner on 26 November 2026, and built in six stages. A
 visitor's browser encrypts a comment to keys only the owner holds and posts it to one path of the site's own origin;
 the web server forwards it to a store on a private network; the Mac fetches it, opens it, and hands it to WordPress,
-where it waits in the moderation queue; an approved comment shows at the next publish. Built so far (stage 2): the
-Mac's side, which is `site.json`'s `pigeonhole` block, `lib/pigeonhole.php` (the check and the sorter), `offprint
-collect` and `wp offprint import-submission`. Not built: the form and script on a page, the store, the fetch, the
-keys' set-up, and the admin bar's part. Decided: fetched on a schedule but opened only when the owner asks; held
+where it waits in the moderation queue; an approved comment shows at the next publish. Built so far: the Mac's side
+(stage 2), which is `site.json`'s `pigeonhole` block, `lib/pigeonhole.php` (the check and the sorter), `offprint
+collect` and `wp offprint import-submission`; and the page's side (stage 3), which is the form in export mode
+(`plugin/offprint/src/Pigeonhole.php`), the two scripts a page loads (sources in `pigeonhole/browser/`, built into
+`plugin/offprint/`), `bin/check-site-pigeonhole.php`, and `ADAPTER_PIGEONHOLE`, by which an adapter says its host
+forwards the path. Not built: the store, the fetch, the keys' set-up, and the admin bar's part. Until they are, a
+comment form would post to nothing, which is why no adapter of the tool's sets `ADAPTER_PIGEONHOLE`. Decided: fetched on a schedule but opened only when the owner asks; held
 always; no email about a comment; avatars off; moderating asks for no publish.
 
 Also deferred until something needs it: a WordPress filter that lets a site add its own starting addresses.
@@ -160,9 +163,6 @@ Check each is still true before relying on it or fixing it.
 - With shell tracing inherited through `SHELLOPTS`, `bin/check-site`'s trace ends up among a publish's warnings in
   `var/status.json`. Cosmetic. (An inherited `allexport` used to make this fatal on Linux, where no program can be
   started while one environment string is over 128 KiB; `lib/site.sh` now turns `allexport` off first thing.)
-- `tests/adapter.test.sh`'s `no_leak` reports any leftover private folder as a token leak, because it searches for
-  every eight-character piece of the test token, runs of digits included, and the adapter's own code holds such
-  runs. A leftover folder is a real failure; the message is misleading.
 - One timing case in `tests/secret.test.sh` fails when the suite runs beside the two slow suites. Run it alone.
 - With "discourage search engines" on, the exported `robots.txt` still names `wp-sitemap.xml`, which gives an
   extra warning.
@@ -202,6 +202,16 @@ Check each is still true before relying on it or fixing it.
   must take comments). So a plugin that sends new comments to a service of its own is handed imported ones too, and
   nothing warns the owner of it yet. `offprint setup-wp` names the plugins WordPress's image adds (one such service's
   among them) but deletes none.
+- The search for the local host name in `bin/check-site` reads bytes, so it does not see one in a feed or sitemap
+  written in UTF-16 (the address check reads those with the XML parser; a page or stylesheet in UTF-16 is refused).
+  The exporter's own refusal of the local host name reads bytes too.
+- Pigeonhole: the script that encrypts a comment is 135 KB (about 52 KB compressed): the age library brings parts a
+  comment never uses. It loads only when a visitor first touches the form. What it says to a visitor is in English
+  only, and written into the script.
+- Pigeonhole: the two scripts' addresses carry no version, so a host or a browser that keeps an old copy keeps it
+  until its own cache lets go.
+- Pigeonhole: `bin/check-site-pigeonhole.php` reads every page with the HTML parser a second time (the address
+  check reads each first), which a site of many thousands of pages will feel.
 - There is no release tag yet.
 
 ## Working with the owner

@@ -792,6 +792,81 @@ PH_CHECK=$?
 [ "$PH_CHECK" = 0 ] || printf '%s\n' "$CHECK_OUT" | head -8 | sed 's/^/    pigeonhole check: /'
 check "pigeonhole: ... and it passes bin/check-site"           equals "$PH_CHECK" 0
 
+# --- comment forms on the exported pages (a site with a pigeonhole) -------------------------------------------------
+# WordPress takes the pigeonhole's path and keys when its container is made, so it is made again here with them (the
+# compose file turns the two into constants). Then a post that takes comments shows WordPress's own form, pointed at
+# the path, with the keys and the loader; reply links stay on the page; and bin/check-site compares all of it with
+# what site.json says. Two public keys made for the tests (tests/pigeonhole-browser.test.js has the same).
+PG_DAILY=age1ajjp3mu9nznj5y0gk0hye0v75kcqeda3rq9q0az204f2pp6vtpese0l39k
+PG_RECOVERY=age1lcn5lw0px559ch6rctd5wj8t27d7vqasc0xd4wl85f48zlth75nsru089h
+E2E_PIGEONHOLE_PATH=/_pigeonhole; E2E_PIGEONHOLE_RECIPIENTS="$PG_DAILY $PG_RECOVERY"
+dc up -d --wait wordpress >/dev/null 2>&1
+for _ in $(seq 1 60); do wp option get home >/dev/null 2>&1 && break; perl -e 'select(undef,undef,undef,1)'; done
+check "comment forms: WordPress, made again, has the pigeonhole's path" equals "$(wp eval 'echo OFFPRINT_PIGEONHOLE_PATH;' 2>/dev/null)" /_pigeonhole
+check "comment forms: ... and its keys"                        equals "$(wp eval 'echo OFFPRINT_PIGEONHOLE_RECIPIENTS;' 2>/dev/null)" "$PG_DAILY $PG_RECOVERY"
+wp option update thread_comments 1 >/dev/null; wp option update show_avatars 1 >/dev/null; wp option update comment_registration 0 >/dev/null
+wp comment approve "$PH_C4" >/dev/null   # the reply to Ada's comment: a thread of two on the page
+run_export forms
+PG="$E2E_EXPORT/forms"; PG_PAGE="$PG/takes-comments/index.html"; PG_HTML=$(cat "$PG_PAGE" 2>/dev/null)
+check "comment forms: the export succeeds"                     equals "$EXPORT_STATUS" 0
+[ "$EXPORT_STATUS" = 0 ] || printf '%s\n%s\n' "$EXPORT_OUT" "$EXPORT_ERR" | grep -i error | head -8 | sed 's/^/    comment forms export: /'
+PG_BLOCK="<script type=\"application/json\" id=\"offprint-pigeonhole\">{\"path\":\"/_pigeonhole\",\"recipients\":[\"$PG_DAILY\",\"$PG_RECOVERY\"],\"bits\":18}</script>"
+PG_FORM=$(grep -o '<form [^>]*data-offprint-pigeonhole[^>]*>' "$PG_PAGE" | head -1)
+check "comment forms: a post that takes comments has WordPress's own form, marked ($PG_FORM)" test -n "$PG_FORM"
+check "comment forms: ... its address the path"               contains "$PG_FORM" 'action="/_pigeonhole"'
+check "comment forms: ... and unable to post by itself: its method is dialog" contains "$PG_FORM" 'method="dialog"'
+check "comment forms: ... no form on the page posts"          sh -c "! grep -Eiq \"<form [^>]*method=['\\\"]post\" '$PG_PAGE'"
+check "comment forms: ... and there is one such form"         equals "$(grep -o 'data-offprint-pigeonhole' "$PG_PAGE" | wc -l | tr -d ' ')" 1
+check "comment forms: ... the block, exactly"                  contains "$PG_HTML" "$PG_BLOCK"
+check "comment forms: ... once"                                equals "$(grep -o 'id="offprint-pigeonhole"' "$PG_PAGE" | wc -l | tr -d ' ')" 1
+check "comment forms: ... the loader, as a module, from the site's own origin" contains "$PG_HTML" "<script type=\"module\" src=\"$PUBLIC/wp-content/mu-plugins/offprint/pigeonhole-loader.js\"></script>"
+check "comment forms: ... the field no person sees"            contains "$PG_HTML" 'name="offprint_hp"'
+check "comment forms: ... a line for a reader without scripts" contains "$PG_HTML" 'Without it, this form sends nothing.</p></noscript>'
+check "comment forms: ... the post's id and the parent, for the script to read" sh -c "grep -Eq \"name=['\\\"]comment_post_ID['\\\"][^>]*value=['\\\"]$PH_POST['\\\"]\" '$PG_PAGE' && grep -Eq \"name=['\\\"]comment_parent['\\\"]\" '$PG_PAGE'"
+check "comment forms: ... and no box to save a name in a cookie" sh -c "! grep -Eq \"name=['\\\"]wp-comment-cookies-consent\" '$PG_PAGE'"
+check "comment forms: the loader is exported, the tool's own"  cmp -s "$PG/wp-content/mu-plugins/offprint/pigeonhole-loader.js" "$TOOL/plugin/offprint/pigeonhole-loader.js"
+check "comment forms: the script it loads is exported too (the exporter read its name in the loader), the tool's own" cmp -s "$PG/wp-content/mu-plugins/offprint/pigeonhole.js" "$TOOL/plugin/offprint/pigeonhole.js"
+PG_REPLIES=$(grep -o '<a [^>]*class="comment-reply-link"[^>]*>' "$PG_PAGE" | wc -l | tr -d ' ')   # (not the link that cancels a reply, whose id ends the same)
+PG_APPROVED=$(wp comment list --post_id="$PH_POST" --status=approve --format=count)
+check "comment forms: each approved comment has a reply link ($PG_REPLIES for $PG_APPROVED)" equals "$PG_REPLIES" "$PG_APPROVED"
+check "comment forms: ... every one to the form on the page"   equals "$(grep -o '<a [^>]*class="comment-reply-link"[^>]*>' "$PG_PAGE" | grep -c 'href="#respond"')" "$PG_APPROVED"
+check "comment forms: ... and the link that cancels a reply"    sh -c "grep -q 'id=\"cancel-comment-reply-link\" href=\"#respond\"' '$PG_PAGE'"
+check "comment forms: ... naming its comment, for WordPress's reply script" contains "$PG_HTML" "data-commentid=\"$PH_C1\""
+check "comment forms: ... which the page loads"                sh -c "grep -q 'comment-reply[^\"]*\\.js' '$PG_PAGE'"
+check "comment forms: ... and the export has"                  test -n "$(found_in "$PG" 'comment-reply*.js')"
+check "comment forms: no address anywhere asks WordPress to reply" never_says "$PG" 'replytocom'
+check "comment forms: nothing names WordPress's own comment address" never_says "$PG" 'wp-comments-post'
+# (WordPress's own first comment links to gravatar.com as its author's site: a link is not an avatar)
+check "comment forms: control: exported with no pigeonhole, the same comments carried avatars" sh -c "grep -rq 'gravatar\\.com/avatar' '$E2E_EXPORT/pigeonhole'"
+check "comment forms: no avatar is asked of another site, though the site shows avatars" never_says "$PG" 'gravatar\.com/avatar\|class="avatar'
+check "comment forms: a post with comments closed is exported" test -s "$PG/closed/index.html"
+check "comment forms: a post with comments closed has no form" lacks "$(cat "$PG/closed/index.html" 2>/dev/null)" '/_pigeonhole'
+check "comment forms: ... no block"                            lacks "$(cat "$PG/closed/index.html" 2>/dev/null)" 'offprint-pigeonhole'
+check "comment forms: ... and no loader"                       lacks "$(cat "$PG/closed/index.html" 2>/dev/null)" 'pigeonhole-loader'
+check "comment forms: the home page has no block"              lacks "$(cat "$PG/index.html" 2>/dev/null)" 'offprint-pigeonhole'
+check "comment forms: the exporter says nothing of the comment form" lacks "$EXPORT_OUT" "a form posting to $PUBLIC/_pigeonhole"
+check "comment forms: no commenter's email address is in the export" never_says "$PG" 'ada@example.com\|mallory@example.com\|grace@example.com'
+CHECK_SITE_PIGEONHOLE_PATH=/_pigeonhole CHECK_SITE_PIGEONHOLE_RECIPIENTS="$PG_DAILY $PG_RECOVERY" check_site_as_published "$PG" "$WORK/forms-checked"
+PG_CHECK=$?
+[ "$PG_CHECK" = 0 ] || printf '%s\n' "$CHECK_OUT" | head -8 | sed 's/^/    comment forms check: /'
+check "comment forms: the export passes bin/check-site, told site.json's path and keys" equals "$PG_CHECK" 0
+# site.json changed (the recovery key dropped) and the container not made again: the pages still carry the old keys.
+CHECK_SITE_PIGEONHOLE_PATH=/_pigeonhole CHECK_SITE_PIGEONHOLE_RECIPIENTS="$PG_DAILY" check_site_as_published "$PG" "$WORK/forms-stale"
+PG_CHECK=$?
+check "comment forms: the same export is refused when site.json's keys are others" equals "$PG_CHECK" 1
+check "comment forms: ... saying what to do"                   contains "$CHECK_OUT" "takes-comments/index.html: its comment form's settings (the offprint-pigeonhole block) are not right: its keys are not site.json's. WordPress takes these when its container is made: run offprint compose up -d, then publish again."
+check_site_as_published "$PG" "$WORK/forms-none"
+PG_CHECK=$?
+check "comment forms: ... and when site.json has no pigeonhole at all" equals "$PG_CHECK" 1
+check "comment forms: ... saying so"                           contains "$CHECK_OUT" 'but site.json has no "pigeonhole" block'
+# A site that takes comments from its registered users only: WordPress would show a link to the login page in place
+# of the form, which the checks refuse. Nobody is logged in to a static site, so such a site shows no form.
+wp option update comment_registration 1 >/dev/null
+run_export forms-users
+check "comment forms: users only: the export succeeds"         equals "$EXPORT_STATUS" 0
+check "comment forms: users only: no form, no block, no link to the login page" sh -c "! grep -rq '/_pigeonhole\|offprint-pigeonhole\|wp-login' '$E2E_EXPORT/forms-users/takes-comments/index.html'"
+wp option update comment_registration 0 >/dev/null
+
 # --- summary ------------------------------------------------------------------------------------
 echo "$PASSED passed, $FAILED failed"
 [ "$FAILED" -eq 0 ]

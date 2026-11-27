@@ -38,12 +38,17 @@ services:
       WORDPRESS_DB_PASSWORD: wordpress
       # Caddy terminates TLS, so tell WordPress the request was HTTPS (no redirect loop).
       # $$ is a literal $ for compose. OFFPRINT_PUBLIC_ORIGIN is site.json's public_url, which lib/config.php
-      # only lets through as https://hostname, so it is safe inside the PHP string.
+      # only lets through as https://hostname, so it is safe inside the PHP string. The pigeonhole's two are
+      # site.json's "pigeonhole" block (a path of one name, and one or two age public keys with a space between), held
+      # to their patterns by lib/config.php too, and empty for a site with no such block: then nothing about comments
+      # changes anywhere.
       WORDPRESS_CONFIG_EXTRA: |
         if ( isset( $$_SERVER['HTTP_X_FORWARDED_PROTO'] ) && 'https' === $$_SERVER['HTTP_X_FORWARDED_PROTO'] ) {
             $$_SERVER['HTTPS'] = 'on';
         }
         define( 'OFFPRINT_PUBLIC_ORIGIN', '${OFFPRINT_PUBLIC_ORIGIN:?set by offprint compose}' );
+        define( 'OFFPRINT_PIGEONHOLE_PATH', '${OFFPRINT_PIGEONHOLE_PATH:-}' );
+        define( 'OFFPRINT_PIGEONHOLE_RECIPIENTS', '${OFFPRINT_PIGEONHOLE_RECIPIENTS:-}' );
         define( 'DISALLOW_FILE_EDIT', true );
     volumes:
       - wordpress:/var/www/html

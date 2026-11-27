@@ -566,10 +566,13 @@ offprint_plugin_replace() {
 }
 
 # docker compose for this site, once its compose project is known to be this site's (offprint_require_project, which
-# exits otherwise). The five variables are set for that one command only.
+# exits otherwise). The seven variables are set for that one command only. (The pigeonhole's two are empty for a site
+# with no such block: they are always set here, so one inherited from the environment never reaches compose.)
 dc() {
   offprint_require_project "${1:-}"
   OFFPRINT_PUBLIC_ORIGIN="$SITE_PUBLIC_URL" \
+  OFFPRINT_PIGEONHOLE_PATH="${SITE_PIGEONHOLE_PATH:-}" \
+  OFFPRINT_PIGEONHOLE_RECIPIENTS="${SITE_PIGEONHOLE_RECIPIENTS:-}" \
   OFFPRINT_LOCAL_HOST="$SITE_LOCAL_HOST" \
   OFFPRINT_TLS_PORT="$SITE_TLS_PORT" \
   OFFPRINT_HTTP_PORT="$SITE_HTTP_PORT" \

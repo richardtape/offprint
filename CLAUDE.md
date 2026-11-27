@@ -23,7 +23,9 @@ bin/collect                   offprint collect: what waits in a site's pigeonhol
                               visitor's browser) opened with the daily key, checked, sorted and handed to WordPress,
                               held; the spool is under OFFPRINT_HOME, never in the site folder
 bin/publish-agent             what launchd runs when WordPress asks for a publish; takes var/inbox/publish-request
-bin/check-site                the export checks; bin/check-site-addresses.php does the link, image, form and feed checks
+bin/check-site                the export checks; bin/check-site-addresses.php does the link, image, form and feed checks,
+                              bin/check-site-pigeonhole.php the comment-form ones (a page's block is site.json's, the
+                              two scripts are the tool's own)
 bin/setup-wp                  makes a site's local WordPress (certificate, containers, install, options); on a WordPress it
                               installs, deletes the untouched Sample Page; on any run, commits the tool's own plugin/
                               (never the copy WordPress can write) when HEAD doesn't have it
@@ -47,7 +49,11 @@ os/darwin/install-agent       the user's launchd agent that runs bin/publish-age
 os/darwin/secret              a named secret of a site's in the login Keychain (get, set, delete)
 plugin/                       the WordPress plugin: offprint.php, offprint/{admin-bar.css,admin-bar.js,src/*.php};
                               src/Import.php is wp offprint import-submission, which makes a held comment of one
-                              checked submission
+                              checked submission; src/Pigeonhole.php is the comment form on an exported page;
+                              offprint/pigeonhole.js and pigeonhole-loader.js are the scripts that page loads, built
+                              and committed (never edited by hand)
+pigeonhole/browser/           the sources of those two scripts (src/), the two packages they are built with, pinned
+                              (package.json, package-lock.json), and build.sh, which writes them into plugin/offprint/
 templates/                    compose.yaml, Caddyfile, wordpress/Dockerfile, site.gitignore (for a site's repo)
 docs/how-it-fits-together.md  the diagrams of what lives where and of a publish (README.md embeds the second), and a
                               publish step by step
@@ -58,6 +64,9 @@ docs/security.md              the table of what could go wrong and what stops it
 docs/orientation.md           the picture for an agent new to the project: read it before a first change
 tests/                        every suite (tests/php, tests/fixtures, *.test.sh, *.test.js, e2e.sh, compat-seo.sh);
                               tests/collect-real.sh runs offprint collect with the real age (not in CI);
+                              tests/pigeonhole-browser.test.js tests the page's scripts, and holds the built ones'
+                              hashes; tests/pigeonhole-real.sh builds them again from a clean install and opens what
+                              they encrypt with the real age (not in CI);
                               tests/fixtures/adapters/workflow is an adapter outside the tool, for tests/publish.test.sh;
                               tests/fixtures/age-standin is the stand-in age every suite that publishes puts first on
                               the PATH, and tests/backup-real.sh runs the real age the same ways (not in CI);
@@ -102,6 +111,14 @@ tests/                        every suite (tests/php, tests/fixtures, *.test.sh,
   every link to the site, and the checks refuse the local host name anywhere: either would fail every publish once
   the comment was approved). What WordPress answers to an import is data: one line of three shapes, or no answer.
   One submission that can't be taken never holds up those behind it.
+- The two scripts a page with a comment form loads are built from `pigeonhole/browser/` and committed in
+  `plugin/offprint/`; a site is published with the committed ones, and `bin/check-site` refuses an export whose copies
+  differ. Never edit them by hand. After any change to `pigeonhole/browser/`: run `build.sh` there, read what changed,
+  put the new hashes in `tests/pigeonhole-browser.test.js`, and run `tests/pigeonhole-real.sh` on the Mac. What a page
+  carries (where a comment is posted, to whose keys) is WordPress's to print and `bin/check-site`'s to compare with
+  `site.json`; those comparisons are defences like the rest. So is this: the comment form never posts by itself
+  (its method is `dialog`), and nothing else on a page may send to the pigeonhole's path. A visitor whose browser
+  didn't run the script must send nothing.
   Each of these has a test and a comment saying why, as the publish's defences have.
 - The database dump is never committed, or left in `backup/`, readable: a publish refuses a site with no `backup` block
   or no `age`, and the readable dump in `var/` is removed on every exit.
@@ -116,40 +133,43 @@ tests/                        every suite (tests/php, tests/fixtures, *.test.sh,
 - Built: the adapters `none` and `cloudflare-workers` (`offprint adapter setup` and `doctor` set it up and check it);
   `offprint new` (a site folder only: it runs no set-up); the encrypted database backup, `offprint backup verify` and
   `offprint backup restore`. Built in part: Pigeonhole, comments on a static site. What is built is the Mac's side
-  (`site.json`'s `pigeonhole` block, `offprint collect`, the import); what is not is everything that gets a comment
-  to the Mac (the form and script on a page, the server that stores submissions, fetching from it, making the keys),
-  so no site can take a comment yet. Not built: any place to send the backup but the site's repository; the `ssh`
+  (`site.json`'s `pigeonhole` block, `offprint collect`, the import) and the page's side (the form on an exported
+  page, the two scripts that encrypt and post a comment, the checks of both); what is not is everything between (the
+  server that stores submissions, fetching from it, making the keys), so no site can take a comment yet. A publish
+  refuses a site with a `pigeonhole` block unless its adapter sets `ADAPTER_PIGEONHOLE=1`, and no adapter of the
+  tool's does. Not built: any place to send the backup but the site's repository; the `ssh`
   adapter; a top-level `setup`, `doctor` or `upgrade`. Do not describe those as if they were.
 
 ## Tests
 
 ```sh
-composer install && vendor/bin/phpunit      # 430 tests
-node --test tests/*.test.js                 # 11 tests
-bash tests/check-site.test.sh               # 407
+composer install && vendor/bin/phpunit      # 454 tests
+node --test tests/*.test.js                 # 31 tests
+bash tests/check-site.test.sh               # 504
 bash tests/new.test.sh                      # 381
 bash tests/publish.test.sh                  # 1439 (slow: several minutes)
-bash tests/adapter.test.sh                  # 2183 (slow: several minutes)
+bash tests/adapter.test.sh                  # 2244 (slow: several minutes)
 bash tests/secret.test.sh                   # 335
 bash tests/agent.test.sh                    # 305
 bash tests/hosts-block.test.sh              # 4
 bash tests/host.test.sh                     # 780
-bash tests/config.test.sh                   # 323
+bash tests/config.test.sh                   # 325
 bash tests/names.test.sh                    # 9
 bash tests/backup.test.sh                   # 273
 bash tests/collect.test.sh                  # 366
-bash tests/e2e.sh                           # 343; needs Docker; not in CI
+bash tests/e2e.sh                           # 384; needs Docker; not in CI
 bash tests/compat-seo.sh wordpress-seo      # 6; needs Docker and the network; not in CI; never beside e2e.sh
 bash tests/backup-real.sh                   # 15; needs the real age (brew install age); not in CI
 bash tests/restore-real.sh                  # 31; needs Docker, mkcert and the real age; not in CI
 bash tests/collect-real.sh                  # 20; needs the real age; not in CI
+bash tests/pigeonhole-real.sh               # 16; needs node, npm, the real age and the network; not in CI
 bash tests/site.test.sh SITE_DIR            # needs a real, running site; not in CI
 ```
 
 The shell suites print one `ok` or `FAIL` line per case; the counts above are the `ok` lines on macOS. On Linux (CI)
 they differ: `check-site`, `publish`, `adapter`, `agent` and `host` print fewer, since the cases that need the Mac
 (`plutil`, or a disk that takes two letter cases for one name) are skipped there, with a `skip` line; `config` prints
-more, since some of its cases run again under a second bash. All but the last six are hermetic and run in CI.
+more, since some of its cases run again under a second bash. All but the last seven are hermetic and run in CI.
 `tests/adapter.test.sh` (the adapter contract, both adapters, `offprint adapter setup` and `doctor`) and
 `tests/secret.test.sh` (`os/darwin/secret`) are the adapters' suites; `tests/new.test.sh` is `offprint new`'s (its
 setup-wp half, the Sample Page and the plugin commit, is in `tests/publish.test.sh`, with setup-wp's other cases). CI
@@ -181,6 +201,9 @@ the `plutil` and `install-agent` cases) are never run in CI. So run `check-site`
 - No test runs the real `age` but `tests/backup-real.sh`, which makes its keys in shell variables only and touches no
   site. Every other suite that reaches a publish or `offprint backup verify` has `tests/fixtures/age-standin` first on
   the `PATH`. Run `tests/backup-real.sh` on the Mac before merging any change to the backup.
+- `tests/pigeonhole-real.sh` is the one test that runs the real `npm ci` (with `--ignore-scripts`, from the lock file
+  in `pigeonhole/browser/`, into a temporary folder): it needs the network and is never run in CI. Run it on the Mac
+  before merging any change to `pigeonhole/browser/` or to the two built scripts.
 - `tests/collect.test.sh` runs `offprint collect` with a stand-in `age`, `docker` and `security` (`OFFPRINT_SECURITY`),
   and `OFFPRINT_HOME` inside its temp folder. `tests/collect-real.sh` runs the real `age` with keys of its own, in
   shell variables only, and the same stand-ins for the rest: run it on the Mac before merging any change to

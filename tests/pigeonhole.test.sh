@@ -200,9 +200,52 @@ for line in "			header_up -Authorization" "			header_up -Accept-Language" "			he
 done
 has "$t: ... and no password, which is not a locked account" "usermod -p '*' pigeonhole-jump" "$web"
 has "$t: its folder is root's" "install -d -m 755 -o root -g root /var/lib/pigeonhole-jump /var/lib/pigeonhole-jump/.ssh" "$web"
-for line in "Match User pigeonhole-jump" "	AllowTcpForwarding local" "	AllowStreamLocalForwarding no" "	PermitListen none" "	PermitTTY no" "Match all" "sshd -t"; do
+for line in "Match User pigeonhole-jump" "	AllowTcpForwarding local" "	AllowStreamLocalForwarding no" "	PermitListen none" "	PermitTTY no" "Match all"; do
   if printf '%s\n' "$web" | grep -qxF -- "$line"; then ok "$t: sshd's rule for the jump user has \"$(printf '%s' "$line" | tr -d '\t')\""; else bad "$t: no line \"$line\""; fi
 done
+# The owner pastes these lines as root, with no set -e: a line that fails stops nothing after it. An sshd told to read
+# a configuration it can't read exits, and nobody can log in to a server that serves other sites too. So sshd is
+# reloaded only by the line that asked sshd -t first, and never by a signal (which asks nothing).
+lacks "$t: sshd is never sent a signal to re-read its configuration" "kill" "$web"
+lacks "$t: ... and its pid file is never read" "sshd.pid" "$web"
+check "$t: sshd -t is on no line of its own, where failing would stop nothing" 0 "$(printf '%s\n' "$web" | grep -cx 'sshd -t')"
+check "$t: every line that reloads sshd asks sshd -t first, on that line" "1 0" "$(printf '%s\n' "$web" | grep -v '^#' | grep -c '^if sshd -t; then .*reload') $(printf '%s\n' "$web" | grep -v '^#' | grep 'reload\|restart' | grep -vc '^if sshd -t; then ')"
+has "$t: the comment beside it says what to do when sshd -t refuses" "remove the file just written" "$web"
+# That line, run as it would be pasted (no set -e), with stand-ins for sshd, systemctl and kill.
+reload_line="$(printf '%s\n' "$web" | grep '^if sshd -t; then ')"
+mkdir "$tmp/case$n/sshd"
+for prog in sshd systemctl kill; do
+  cat > "$tmp/case$n/sshd/$prog" <<'STUB'
+#!/bin/bash
+me="${0##*/}"
+printf '%s\n' "$me $*" >> "$CALLS"
+[ ! -f "$FAILS/$me" ] && [ ! -f "$FAILS/$me $*" ]
+STUB
+  chmod +x "$tmp/case$n/sshd/$prog"
+done
+# reload_run NAME [WHAT FAILS...]: runs the line; sets out, code and called (what was run, on one line)
+reload_run() {
+  local d="$tmp/case$n/sshd/$1"; shift
+  mkdir -p "$d/fails"; : > "$d/calls"; while [ $# -gt 0 ]; do : > "$d/fails/$1"; shift; done
+  out="$(printf '%s\necho after\n' "$reload_line" | PATH="$tmp/case$n/sshd:/usr/bin:/bin" CALLS="$d/calls" FAILS="$d/fails" /bin/bash 2>&1)"; code=$?
+  called="$(paste -sd'|' - < "$d/calls")"
+}
+reload_run good
+check "$t: sshd -t passing, sshd is reloaded, once" "sshd -t|systemctl reload ssh" "$called"
+check "$t: ... and nothing is said" "after" "$out"
+reload_run other "systemctl reload ssh"
+check "$t: where the unit is sshd, that one is reloaded" "sshd -t|systemctl reload ssh|systemctl reload sshd" "$called"
+reload_run refused sshd
+check "$t: sshd -t refusing, nothing is reloaded and nothing signalled" "sshd -t" "$called"
+has "$t: ... it says sshd was not reloaded" "sshd was NOT reloaded" "$out"
+has "$t: ... and to remove the file just written, by its name" "rm /etc/ssh/sshd_config.d/offprint-pigeonhole-jump.conf" "$out"
+check "$t: ... and the lines pasted after it still run (it stops no shell)" "after" "$(printf '%s\n' "$out" | tail -n 1)"
+check "$t: ... the file it names is the one the commands wrote" 1 "$(printf '%s\n' "$web" | grep -c "^cat > /etc/ssh/sshd_config.d/offprint-pigeonhole-jump.conf <<'SSHD'\$")"
+# {client_ip} behind a proxy: by default Caddy takes the first address in X-Forwarded-For, which a visitor writes.
+has "$t: the Caddy note names the option for the header the proxy itself sets" "client_ip_headers" "$web"
+has "$t: ... and the strict reading of X-Forwarded-For" "trusted_proxies_strict" "$web"
+has "$t: ... beside trusted_proxies" "(trusted_proxies)" "$web"
+has "$t: ... and says a visitor chooses the first address of X-Forwarded-For" "the first address in X-Forwarded-For, which is whatever a visitor wrote" "$web"
 check "$t: sshd's rule ends by matching everyone again, so nothing after it is this user's alone" "Match all" "$(printf '%s\n' "$web" | sed -n '/^Match User/,/^SSHD$/p' | sed '$d' | tail -n 1)"
 lacks "$t: no sudo is printed" "sudo" "$web"
 has "$t: says nothing was run" "Nothing here has been run" "$web"

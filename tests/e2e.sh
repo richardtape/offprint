@@ -756,6 +756,54 @@ ph_import hold 'junk'
 check "pigeonhole: refused: junk"                              equals "$PH_OUT" 'refused it is not a checked comment'
 ph "$PH_POST" 0 Ada ada@example.com '' 'x y z'; ph_import publish
 check "pigeonhole: refused: sorted as something else"          equals "$PH_OUT" 'refused it was sorted as neither hold nor spam'
+# This site's own host with one letter written another way, bare in a comment's words. WordPress makes a link of a
+# bare address each time it shows a comment (make_clickable), and these three it made into links to this site: the
+# first (a browser reads the reference back as the letter) to a page that is not there, which the exporter followed and
+# failed on; all three to wp-admin, which bin/check-site refused. One approved comment stopped every publish. The
+# import now makes those links itself, and keeps an address only when it is plainly another site's; and export mode
+# links nothing more in a comment the import made.
+# odd KIND HOST: HOST with its first letter as a character reference, percent-encoded, or fullwidth
+odd() { php -r '$h = $argv[2]; $c = ord($h[0]); $r = substr($h, 1);
+  echo $argv[1] === "entity" ? "&#$c;$r" : ($argv[1] === "percent" ? sprintf("%%%02x%s", $c, $r) : mb_chr(0xFF00 + $c - 0x20, "UTF-8") . $r);' "$1" "$2"; }
+PH_HOST=${PUBLIC#https://}
+PH_ODD_IDS=""
+for kind in entity percent fullwidth; do
+  PH_ODD=$(odd "$kind" "$PH_HOST")
+  ph "$PH_POST" 0 "Odd $kind" "odd-$kind@example.org" "https://$PH_ODD/odd-url-$kind" "MARKER-ODD-$kind see https://$PH_ODD/odd-page-$kind and https://$PH_ODD/wp-admin/ now"
+  ph_import hold; PH_ODD_IDS="$PH_ODD_IDS $PH_C"
+  check "pigeonhole: this site's host with a letter written as $kind: imported, held ($PH_OUT)" equals "$(ph_field "$PH_C" comment_approved)" 0
+  PH_STORED=$(ph_field "$PH_C" comment_content)
+  check "pigeonhole: ... its words kept"                      contains "$PH_STORED" "https://$PH_ODD/odd-page-$kind"
+  check "pigeonhole: ... and no address in any tag of what WordPress stored" lacks "$PH_STORED" 'href='
+  check "pigeonhole: ... nor as the commenter's own web address" equals "$(ph_field "$PH_C" comment_author_url)" ""
+done
+# What else WordPress links in a comment's words: another site's address (kept, as a link made once, at import), one
+# that starts www. (the same), an ftp address and an email address (linked by WordPress, so no link here: only a
+# whole http(s) address is one), the local host with a letter encoded, and an address inside a link (left as words).
+ph "$PH_POST" 0 Carol carol@example.org '' "MARKER-ADJ a https://other.example.org/bare-kept b www.other.example.org/www-kept c ftp://other.example.org/ftp-file d dave@example.org e <a href=\"https://other.example.org/outer\">inside https://$(odd entity "$PH_HOST")/odd-inside a link</a> f https://$(odd entity "$LOCAL")/odd-local g"
+ph_import hold; PH_ADJ=$PH_C
+PH_STORED=$(ph_field "$PH_ADJ" comment_content)
+check "pigeonhole: a bare address of another site is made a link at import ($PH_OUT)" contains "$PH_STORED" '<a href="https://other.example.org/bare-kept"'
+check "pigeonhole: ... and one that starts www."               contains "$PH_STORED" '<a href="http://www.other.example.org/www-kept"'
+check "pigeonhole: ... the link the commenter wrote is kept"   contains "$PH_STORED" '<a href="https://other.example.org/outer"'
+check "pigeonhole: ... and those three are every address in a tag (no ftp, no mailto, nothing of this site's)" \
+  equals "$(printf '%s' "$PH_STORED" | grep -o 'href=' | wc -l | tr -d ' ')" 3
+check "pigeonhole: ... no mailto"                              lacks "$PH_STORED" 'mailto:'
+check "pigeonhole: ... the words all kept"                     sh -c "printf '%s' \"\$1\" | grep -q 'ftp://other.example.org/ftp-file.* d .*dave@example.org.* e .*inside .*odd-inside a link.* f .*odd-local.* g'" _ "$PH_STORED"
+check "pigeonhole: ... and no link was made inside the link the commenter wrote" \
+  sh -c "printf '%s' \"\$1\" | grep -q '<a href=\"https://other.example.org/outer\"[^>]*>inside [^<]*odd-inside a link</a>'" _ "$PH_STORED"
+# The admin screen shows a comment through WordPress's own filters, make_clickable among them, a second time over
+# what the import linked: no link inside a link comes of it.
+PH_SHOWN=$(wp eval "\$c = get_comment($PH_ADJ); echo apply_filters('comment_text', \$c->comment_content, \$c, array());" 2>/dev/null)
+check "pigeonhole: shown in WordPress itself, the link made at import is one link, not a link in a link" \
+  equals "$(printf '%s' "$PH_SHOWN" | grep -o '<a href="https://other.example.org/bare-kept"' | wc -l | tr -d ' ') $(printf '%s' "$PH_SHOWN" | grep -c '<a [^>]*><a ')" "1 0"
+check "pigeonhole: ... control: WordPress did show it"         contains "$PH_SHOWN" 'MARKER-ADJ'
+# A comment the import made whose words changed afterwards, by a route the import never saw (here WP-CLI; an edit in
+# wp-admin, another plugin): export mode still links nothing in it.
+ph "$PH_POST" 0 Erin erin@example.org '' 'MARKER-RAW to be changed'; ph_import hold; PH_RAW=$PH_C
+wp comment update "$PH_RAW" --comment_content="MARKER-RAW see https://$(odd entity "$PH_HOST")/odd-raw and https://$(odd percent "$PH_HOST")/wp-admin/ and https://other.example.org/raw-foreign now" >/dev/null
+check "pigeonhole: control: an imported comment's words, changed in WordPress, hold a bare address and no link" \
+  sh -c "printf '%s' \"\$1\" | grep -q 'odd-raw' && ! printf '%s' \"\$1\" | grep -q 'href='" _ "$(ph_field "$PH_RAW" comment_content)"
 # A post of a type that a plugin registers takes comments like any other: the import loads the site's plugins.
 mkdir -p "$E2E_WP_CONTENT/plugins/e2e-books"
 cat > "$E2E_WP_CONTENT/plugins/e2e-books/e2e-books.php" <<'PHP'
@@ -775,6 +823,11 @@ check "pigeonhole: nothing was published by importing: one more approved comment
 ph_no_mail "about those either"
 # Approved, the hostile comment must neither run anything on the public page nor stop the publish.
 wp comment approve "$PH_C2" "$PH_C6" >/dev/null
+# shellcheck disable=SC2086 # three IDs
+wp comment approve $PH_ODD_IDS "$PH_ADJ" "$PH_RAW" >/dev/null
+# A comment made in WordPress by another route (the owner's own reply): its bare addresses are linked as ever.
+PH_OWNER=$(wp comment create --comment_post_ID="$PH_POST" --comment_author=Owner --comment_author_email=owner@example.org --comment_approved=1 \
+  --comment_content="MARKER-OWNER see https://other.example.org/owner-bare and $PUBLIC/closed/ now" --porcelain)
 rm -f "$E2E_WP_CONTENT/mu-plugins/zz-e2e-mail.php" "$E2E_WP_CONTENT/e2e-mail.log"
 wp post delete "$PH_LOCKED" --force >/dev/null   # (its password form posts to the login page, which the checks refuse)
 run_export pigeonhole
@@ -787,6 +840,19 @@ check "pigeonhole: ... the one named for the local host is, under its replaced n
 for bad in '<script>alert' 'onerror' 'onclick' 'javascript:' '<iframe' 'href="alert' 'not-there'; do
   check "pigeonhole: ... and the page has no $bad"             lacks "$PH_PAGE" "$bad"
 done
+for kind in entity percent fullwidth; do
+  check "pigeonhole: ... the comment with a letter as $kind is on the page" contains "$PH_PAGE" "MARKER-ODD-$kind"
+  check "pigeonhole: ... with no link made of its words"       sh -c "! grep -q 'href=[^>]*odd-page-$kind' \"\$1\"" _ "$E2E_EXPORT/pigeonhole/takes-comments/index.html"
+  check "pigeonhole: ... nor of its commenter's web address"   lacks "$PH_PAGE" "odd-url-$kind"
+done
+check "pigeonhole: ... and no link on the page leads to wp-admin" sh -c "grep -q MARKER-ODD \"\$1\" && ! grep -q 'href=[^>]*wp-admin' \"\$1\"" _ "$E2E_EXPORT/pigeonhole/takes-comments/index.html"
+check "pigeonhole: ... the links made at import are on the page" sh -c "printf '%s' \"\$1\" | grep -q '<a href=\"https://other.example.org/bare-kept\"' && printf '%s' \"\$1\" | grep -q '<a href=\"http://www.other.example.org/www-kept\"'" _ "$PH_PAGE"
+check "pigeonhole: ... nothing else in that comment is a link (no ftp, no mailto, no address inside a link, no local host)" \
+  sh -c "! grep -q 'href=[^>]*\\(ftp-file\\|mailto:\\|odd-inside\\|odd-local\\)' \"\$1\"" _ "$E2E_EXPORT/pigeonhole/takes-comments/index.html"
+check "pigeonhole: ... an imported comment changed afterwards is on the page, with no link made of its words" \
+  sh -c "grep -q MARKER-RAW \"\$1\" && ! grep -q 'href=[^>]*\\(odd-raw\\|raw-foreign\\)' \"\$1\"" _ "$E2E_EXPORT/pigeonhole/takes-comments/index.html"
+check "pigeonhole: ... a comment made in WordPress by another route has its bare addresses linked, as ever" \
+  sh -c "printf '%s' \"\$1\" | grep -q '<a href=\"https://other.example.org/owner-bare\"' && printf '%s' \"\$1\" | grep -q \"<a href=\\\"$PUBLIC/closed/\\\"\"" _ "$PH_PAGE"
 check "pigeonhole: ... nor any commenter's email address"      never_says "$E2E_EXPORT/pigeonhole" 'ada@example.com\|mallory@example.com'
 check_site_as_published "$E2E_EXPORT/pigeonhole" "$WORK/pigeonhole-checked"
 PH_CHECK=$?
@@ -835,6 +901,10 @@ check "comment forms: ... and the link that cancels a reply"    sh -c "grep -q '
 check "comment forms: ... naming its comment, for WordPress's reply script" contains "$PG_HTML" "data-commentid=\"$PH_C1\""
 check "comment forms: ... which the page loads"                sh -c "grep -q 'comment-reply[^\"]*\\.js' '$PG_PAGE'"
 check "comment forms: ... and the export has"                  test -n "$(found_in "$PG" 'comment-reply*.js')"
+check "comment forms: with a pigeonhole too, no link is made of an imported comment's words" \
+  sh -c "grep -q MARKER-ODD-entity '$PG_PAGE' && grep -q MARKER-RAW '$PG_PAGE' && ! grep -q 'href=[^>]*\\(odd-page\\|odd-raw\\|raw-foreign\\|odd-inside\\|wp-admin\\)' '$PG_PAGE'"
+check "comment forms: ... the links made at import are there"  contains "$PG_HTML" '<a href="https://other.example.org/bare-kept"'
+check "comment forms: ... and a comment made in WordPress by another route has its bare addresses linked" contains "$PG_HTML" '<a href="https://other.example.org/owner-bare"'
 check "comment forms: no address anywhere asks WordPress to reply" never_says "$PG" 'replytocom'
 check "comment forms: nothing names WordPress's own comment address" never_says "$PG" 'wp-comments-post'
 # (WordPress's own first comment links to gravatar.com as its author's site: a link is not an avatar)

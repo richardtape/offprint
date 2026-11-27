@@ -321,7 +321,11 @@ site's owner holds, by a script the site's own web server sends them.
    exactly the path is passed to the store, with the whole request taken first and the visitor's address set by
    Caddy itself) and the commands for the user the Mac's ssh passes through (`pigeonhole-jump`, whose key may only
    open a connection on to the store's ssh: its key's line says so, and a rule for that user in
-   `/etc/ssh/sshd_config.d/` forbids what a key's line can't).
+   `/etc/ssh/sshd_config.d/` forbids what a key's line can't). The last of those commands reloads sshd only when
+   `sshd -t` found its whole configuration right; when it says sshd was not reloaded, remove the file it names. If
+   a proxy stands in front of Caddy, read the note printed above the Caddy lines: the limit on each visitor holds
+   only when Caddy reads the visitor's address from what the proxy itself set (`trusted_proxies` with
+   `client_ip_headers`, or `trusted_proxies_strict`).
 5. **The adapter.** The site's own adapter says its host passes the path on: `ADAPTER_PIGEONHOLE=1`
    ([A site's own adapter](#a-sites-own-adapter)). A publish refuses a site with the block until it does.
 6. **`offprint compose up -d`** (WordPress takes the path and keys when its container is made), then
@@ -347,7 +351,10 @@ spam when a hidden field was filled in or it was sent within 3 seconds), and han
 one `ok:` or `problem:` line. The import holds every comment, whatever WordPress's settings would allow; filters
 its HTML; keeps a link's address only when it is a whole `http(s)` one to another site, and replaces an address of
 this site's own in the comment's words with "[a link to this site]" (a link to a page of yours that isn't there
-would fail every publish; put a real link back when you moderate, if you want it); takes the same comment arriving
+would fail every publish; put a real link back when you moderate, if you want it); makes a link of a bare address
+in the comment's words, as WordPress would when showing it, under the same rule (the static page links nothing
+more in such a comment, so an address you add to one when moderating is a link only if you write it as one; an
+email address stays as words); takes the same comment arriving
 twice as one; and sends no email about it. It runs with the site's plugins and theme loaded, so a post of a type one
 of them registers takes comments like any other; a plugin of yours that acts on new comments (one that sends them
 to a spam service, say) is handed these too.

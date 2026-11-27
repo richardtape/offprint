@@ -269,21 +269,58 @@ final class Import
     }
 
     /**
+     * Whether a comment is one this import made: by what its user-agent column says (AGENT, written in the same row
+     * as its words). Export mode asks, for each comment it shows (Export_Mode::link_addresses()).
+     */
+    public static function made($comment): bool
+    {
+        return is_object($comment) && isset($comment->comment_agent) && $comment->comment_agent === self::AGENT;
+    }
+
+    /**
      * A filter on a comment's text (slashed, as WordPress passes it): every address in a tag (a link's href, a
      * quotation's cite) stays only when it may be a link (foreign()); the words stay either way, but for an address
      * of this site's own among them (without_own_addresses()).
+     *
+     * And a bare address in the words is made a link here, by WordPress's own make_clickable(), then held to the same
+     * rule. WordPress would otherwise make that link itself each time it showed the comment, out of whatever it took
+     * for an address, and nothing would have looked at it: this site's own host with one letter written as a
+     * character reference (which a browser reads back as the letter) became a link the exporter followed to a page
+     * that is not there, and with a letter percent-encoded or fullwidth, a link to wp-admin that the checks refused.
+     * Either failed every publish once the comment was approved. No list of spellings is kept here: whatever
+     * WordPress would link is linked now, and a link whose address is not plainly another site's loses it. Export
+     * mode then links nothing more in a comment this import made (Export_Mode::link_addresses()). Words already
+     * inside a link are left as words (a link in a link is no markup); an email address or an ftp one is linked by
+     * WordPress and so loses its address too, and stays as words.
      */
     public static function whole_links_only($content)
     {
-        $html = new \WP_HTML_Tag_Processor(wp_unslash((string) $content));
-        while ($html->next_tag()) {
+        $text = self::strict(wp_unslash((string) $content));
+        $pieces = preg_split('~(<a[\s>].*?</a\s*>)~is', $text, -1, PREG_SPLIT_DELIM_CAPTURE);
+        if ($pieces === false) {
+            // (the pattern failed on this text: all of it is given to make_clickable, and to the same rule after)
+            $pieces = array($text);
+        }
+        foreach ($pieces as $i => $piece) {
+            if ($i % 2 === 0) {
+                $pieces[$i] = make_clickable($piece);
+            }
+        }
+        return wp_slash(self::strict(implode('', $pieces)));
+    }
+
+    /** $html with no address in a tag but one that may be a link, and no address of this site's own in its words. */
+    private static function strict(string $html): string
+    {
+        $tags = new \WP_HTML_Tag_Processor($html);
+        while ($tags->next_tag()) {
             foreach (array('href', 'cite', 'src') as $name) {
-                $value = $html->get_attribute($name);
+                $value = $tags->get_attribute($name);
                 if ($value !== null && (!is_string($value) || !self::foreign($value, self::$own))) {
-                    $html->remove_attribute($name);
+                    $tags->remove_attribute($name);
                 }
             }
         }
-        return wp_slash(self::without_own_addresses($html->get_updated_html(), self::$own));
+        return self::without_own_addresses($tags->get_updated_html(), self::$own);
     }
 }

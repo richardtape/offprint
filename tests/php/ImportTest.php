@@ -122,6 +122,24 @@ final class ImportTest extends TestCase
             ['https://blog.example.com./not-there', ''],
             ['https://blog.example.com:443/not-there', ''],
             ['https://mysite.local/wp-admin/', ''],
+            // this site's own host with one letter written another way (a character reference, a percent-encoding,
+            // a fullwidth letter): a browser, the exporter or the checks read each as this site, so none is an address
+            ['https://bl&#111;g.example.com/not-there', ''],
+            ['https://bl&#x6F;g.example.com/not-there', ''],
+            ['https://bl&omicron;g.example.com/not-there', ''],
+            ['https://bl%6Fg.example.com/wp-admin/', ''],
+            ['https://bl%6fg.example.com/wp-admin/', ''],
+            ["https://\u{FF42}log.example.com/wp-admin/", ''],
+            ["https://blog\u{FF0E}example.com/wp-admin/", ''],
+            ["https://blog\u{3002}example.com/wp-admin/", ''],
+            ['https://mysite&#46;local/wp-admin/', ''],
+            ['https://m%79site.local/wp-admin/', ''],
+            // nor is another site's, written so: only a host name written plainly is one
+            ['https://www.ex%61mple.org/', ''],
+            ['https://www.ex&#97;mple.org/', ''],
+            // what WordPress makes of a bare ftp address or an email address in a comment's words
+            ['ftp://ftp.example.org/file', ''],
+            ['mailto:ada@example.org', ''],
             // another site's address that names one of this site's hosts further in: the checks refuse the local name anywhere
             ['https://other.example.com/?mysite.local', ''],
             ['https://other.example.com/blog.example.com/x', ''],
@@ -150,6 +168,17 @@ final class ImportTest extends TestCase
     {
         $this->assertSame($kept, Import::parse(self::line([], ['url' => $given]), ['blog.example.com', 'mysite.local'])['url']);
         $this->assertSame($kept !== '', Import::foreign($given, ['blog.example.com', 'mysite.local']));
+    }
+
+    public function testACommentThatCameThroughThePigeonholeIsKnownByItsAgent(): void
+    {
+        $this->assertTrue(Import::made((object) ['comment_agent' => Import::AGENT]));
+        $this->assertFalse(Import::made((object) ['comment_agent' => 'Mozilla/5.0']));
+        $this->assertFalse(Import::made((object) ['comment_agent' => '']));
+        $this->assertFalse(Import::made((object) ['comment_agent' => Import::AGENT . ' ']));
+        $this->assertFalse(Import::made((object) []));
+        $this->assertFalse(Import::made(null));
+        $this->assertFalse(Import::made('offprint-pigeonhole'));
     }
 
     public function testTheAnswersAreOneLineEach(): void

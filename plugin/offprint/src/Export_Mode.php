@@ -90,6 +90,12 @@ final class Export_Mode
             add_filter('comments_open', '__return_false', PHP_INT_MAX);
         }
         add_filter('pings_open', '__return_false', PHP_INT_MAX);
+        // WordPress makes a link of each bare address in a comment's words as it shows them (make_clickable, one of
+        // its own filters on comment_text). For a comment that came through the pigeonhole that is a link nothing
+        // has looked at: see link_addresses().
+        if (remove_filter('comment_text', 'make_clickable', 9)) {
+            add_filter('comment_text', array(self::class, 'link_addresses'), 9, 2);
+        }
         add_filter('feed_links_show_comments_feed', '__return_false');
         add_filter('bloginfo_rss', array(self::class, 'feed_home_slash'), 10, 2);
 
@@ -119,6 +125,23 @@ final class Export_Mode
         }
         $path = (string) parse_url($value, PHP_URL_PATH);
         return self::$public . rtrim($path, '/');
+    }
+
+    /**
+     * comment_text, in place of WordPress's make_clickable: a comment the import made (a stranger's words) is shown
+     * with the links the import passed and no others. The import has already made a link of each bare address that
+     * may be one (Import::whole_links_only()); what WordPress would link here besides is what the import refused, or
+     * never saw: this site's own host written with a letter encoded, as a link to a page that is not there (the
+     * exporter follows it, and the publish fails) or to wp-admin (the checks refuse it). One approved comment would
+     * stop every publish. Any other comment (the owner's own, one that came with a database) is linked as WordPress
+     * always has; and words that come with no comment to ask about are linked nowhere.
+     */
+    public static function link_addresses($text, $comment = null)
+    {
+        if (!is_string($text) || !is_object($comment) || Import::made($comment)) {
+            return $text;
+        }
+        return make_clickable($text);
     }
 
     public static function remove_head_links(): void

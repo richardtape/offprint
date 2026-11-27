@@ -210,9 +210,13 @@ if [ "$sub" = print-server ]; then
 #   - request_buffers: Caddy takes the whole of a request before it passes any of it on, so someone who sends a body
 #     a byte at a time holds a place in Caddy, not one of the store's few.
 #   - The store is told the visitor's address in one header, for a limit it holds in memory and never writes down.
-#     Caddy sets that header itself, in place of anything a visitor sent under its name. {client_ip} is the
-#     visitor's own only when Caddy knows which proxies stand in front of it (trusted_proxies, in the global
-#     options): with a proxy in front and that unset, every visitor would share the proxy's address and its limit.
+#     Caddy sets that header itself, in place of anything a visitor sent under its name. With nothing in front of
+#     Caddy, {client_ip} is the visitor's own. With a proxy in front it is only when Caddy's global options say two
+#     things. Which proxies stand in front of it (trusted_proxies): with that unset, every visitor would share the
+#     proxy's address and its limit. And where the visitor's address is read from: the header the proxy itself sets
+#     and no visitor can (client_ip_headers), or X-Forwarded-For read from its far end (trusted_proxies_strict).
+#     With neither, Caddy takes the first address in X-Forwarded-For, which is whatever a visitor wrote there: one
+#     visitor could name a new address with each request, and the limit would hold nobody.
 #   - What a browser says of itself and its user is taken off on the way: cookies, the referrer, the browser's
 #     name and hints, its languages, any credentials, and every other header that names an address. (A header no
 #     line here names is passed on as it came: the store reads none of them.)
@@ -268,7 +272,13 @@ printf '%s\n' 'restrict,port-forwarding,permitopen="$(bracketed "$SITE_PIGEONHOL
 # A key's own line can't forbid everything: a listening socket (ssh -R /path) is not a port, and no option there
 # stops it. sshd itself does, for this user alone. (Debian and Ubuntu read /etc/ssh/sshd_config.d/*.conf from the
 # top of sshd_config: check that yours does. "Match all" ends the part that is this user's, so nothing after it in
-# sshd's own file is taken for this user's alone.) sshd -t reads the whole configuration before it is used.
+# sshd's own file is taken for this user's alone.)
+#
+# The last line asks sshd to read its configuration again only when sshd -t found the whole of it right. An sshd
+# told to re-read a configuration it can't read stops, and nobody can log in to this machine over ssh until it is
+# started from the console: so there is no other way to reload here, and none to add. If that line says sshd was NOT
+# reloaded, nothing has changed for sshd: remove the file just written (the rm it names), and run sshd -t again to
+# see whether the mistake was there before.
 
 cat > /etc/ssh/sshd_config.d/offprint-$PIGEONHOLE_JUMP_USER.conf <<'SSHD'
 Match User $PIGEONHOLE_JUMP_USER
@@ -282,8 +292,7 @@ Match User $PIGEONHOLE_JUMP_USER
 Match all
 SSHD
 chmod 644 /etc/ssh/sshd_config.d/offprint-$PIGEONHOLE_JUMP_USER.conf
-sshd -t
-systemctl reload ssh 2> /dev/null || systemctl reload sshd 2> /dev/null || kill -HUP "\$(cat /run/sshd.pid)"
+if sshd -t; then systemctl reload ssh 2> /dev/null || systemctl reload sshd; else echo "sshd -t refused its configuration, so sshd was NOT reloaded. Remove the file just written: rm /etc/ssh/sshd_config.d/offprint-$PIGEONHOLE_JUMP_USER.conf"; false; fi
 
 # ---- 3. To check, and to tell site.json ------------------------------------------------------------------------------
 # This machine's ssh host key, for site.json's "jump_host_key" (its first two words):

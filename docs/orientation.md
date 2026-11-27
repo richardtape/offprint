@@ -209,7 +209,12 @@ Check each is still true before relying on it or fixing it.
   (a link to a page that isn't there, or the local host name, would fail every publish once the comment was
   approved). So a commenter can't link to another post of the site: the owner can put the link back when moderating.
   What is replaced is what the import can see: a host name written some other way than with dots or their four
-  encodings is not.
+  encodings is not replaced. It is no link either: the import makes a link of each bare address itself (WordPress's
+  `make_clickable`) and keeps only an address that is plainly another site's, and export mode links nothing more in
+  a comment the import made. (Before 27 November 2026 WordPress linked such a spelling when it showed the comment,
+  and one approved comment failed every publish: seen in the throwaway WordPress.) So a bare address the owner adds
+  to an imported comment when moderating is not linked on the static site: write it as a link. An email address or
+  an `ftp` one in a comment's words stays as words. Comments made any other way are linked as WordPress always has.
 - Pigeonhole: a submission that WordPress, the check or the sorter fails on (not refuses) stays in the spool and is
   tried again on every run, with a `problem:` line each time, until the owner moves it out by hand.
 - Pigeonhole: the import loads the site's plugins and theme (the owner's decision: a post type a plugin registers

@@ -173,11 +173,27 @@ check "the printed Caddy lines, inside a site's block, pass the real caddy valid
 [ "$rc" = 0 ] || printf '%s\n' "$validate" | tail -5
 dcr exec -T web caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile > /dev/null 2>&1
 check "... and Caddy takes them (reload)" 0 "$?"
+# The printed commands reload sshd through systemctl alone, and only once sshd -t has passed. No systemd runs in this
+# container, so a stand-in systemctl, first on root's PATH there, does for "reload ssh" what the real one does: it
+# tells the running sshd to read its configuration again. (The image's own systemctl can reach no systemd.)
+printf '%s\n' '#!/bin/sh' '[ "$1 $2" = "reload ssh" ] || exit 1' 'exec kill -HUP "$(cat /run/sshd.pid)"' > "$tmp/systemctl-standin"
+dcr cp "$tmp/systemctl-standin" web:/usr/local/bin/systemctl > /dev/null 2>&1
+dcr exec -T web chmod 755 /usr/local/bin/systemctl
 web_out="$(dcr exec -T web /bin/bash -eu /root/web-setup.sh 2>&1)"; rc=$?
 check "the printed commands for the jump user run clean, as root" 0 "$rc"
 [ "$rc" = 0 ] || printf '%s\n' "$web_out" | tail -10
 dcr exec -T web /bin/bash -eu /root/web-setup.sh > /dev/null 2>&1
 check "... run a second time, they leave one line for this site, not two" "0 1" "$? $(dcr exec -T web grep -c . /var/lib/pigeonhole-jump/.ssh/authorized_keys | tr -d '\r')"
+# A configuration the real sshd can't read (a mistake in a file of the owner's own, say): the printed line that
+# reloads sshd, pasted as the owner pastes it (no set -e), must leave the running sshd as it was. An sshd told to
+# re-read such a configuration exits, and the owner is locked out of the machine.
+sleep 1
+dcr exec -T web sh -c 'echo "NoSuchOptionOfSshd yes" > /etc/ssh/sshd_config.d/zz-rehearsal-mistake.conf'
+sshd_before="$(dcr exec -T web cat /run/sshd.pid | tr -d '\r')"
+refused_out="$(grep '^if sshd -t; then ' "$tmp/web-setup.sh" | dcr exec -T web /bin/bash 2>&1)"
+has "with a configuration the real sshd -t refuses, the printed line says sshd was not reloaded, and what to remove" "sshd was NOT reloaded. Remove the file just written: rm /etc/ssh/sshd_config.d/offprint-pigeonhole-jump.conf" "$refused_out"
+check "... and the sshd that was running still is, untouched" "$sshd_before yes" "$(dcr exec -T web cat /run/sshd.pid | tr -d '\r') $(dcr exec -T web sh -c 'kill -0 "$(cat /run/sshd.pid)" 2> /dev/null && echo yes' | tr -d '\r')"
+dcr exec -T web rm -f /etc/ssh/sshd_config.d/zz-rehearsal-mistake.conf
 sleep 1
 
 # ---- the doctor: the whole path, with the real everything ---------------------------------------------------------------

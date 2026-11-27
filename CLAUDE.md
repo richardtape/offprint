@@ -142,8 +142,11 @@ tests/                        every suite (tests/php, tests/fixtures, *.test.sh,
   every comment, turns WordPress's HTML filter on (and refuses without it), keeps a link's address only when it is a
   whole one to another site, and replaces an address of the site's own in a comment's words (the exporter follows
   every link to the site, and the checks refuse the local host name anywhere: either would fail every publish once
-  the comment was approved). What WordPress answers to an import is data: one line of three shapes, or no answer.
-  One submission that can't be taken never holds up those behind it.
+  the comment was approved). A bare address in a comment's words is made a link at import, by WordPress's own
+  `make_clickable`, and held to that same rule; export mode then links nothing more in a comment the import made
+  (`Export_Mode::link_addresses`). So no list of the ways a host name can be written is kept, and none is to be
+  added: what WordPress would link is linked once, and looked at. What WordPress answers to an import is data: one
+  line of three shapes, or no answer. One submission that can't be taken never holds up those behind it.
 - The store (`pigeonhole/server/store.js`) knows nothing of a submission but its size, when it came and the address
   the web server named: it has one route, cannot list or give back what it holds, never starts a connection, and
   writes down no address, name or body. It has no dependency but node. Keep it so. A submission is kept whole or
@@ -160,7 +163,9 @@ tests/                        every suite (tests/php, tests/fixtures, *.test.sh,
   print-server`) for the owner to read and run. On each server the pull key's line is root's, and gives no shell: on
   the web server, one onward connection to the store's ssh and no listening port or socket (the key's line, and an
   sshd rule for that user); on the store, `pull.js` and nothing else, and only from the web server's address. Keep
-  it so: `tests/rehearsal.sh` asks the real sshd for each thing the key must not get.
+  it so: `tests/rehearsal.sh` asks the real sshd for each thing the key must not get. The printed commands are
+  pasted with no `set -e`: sshd is reloaded only on the line that asked `sshd -t` first, and never by a signal (an
+  sshd told to re-read a configuration it can't read exits, and the owner is locked out).
 - What the Mac tells WordPress about comments (`var/pigeonhole.json`, `var/pigeonhole-fetch.json`), the agent's log
   and the notification hold counts, times and one fixed word: never a word of a comment, a name or an address.
 - A publish looks at the live site after "Live" (`check_live_comments`): one page with a comment form and the two
@@ -202,7 +207,7 @@ tests/                        every suite (tests/php, tests/fixtures, *.test.sh,
 ## Tests
 
 ```sh
-composer install && vendor/bin/phpunit      # 531 tests
+composer install && vendor/bin/phpunit      # 546 tests
 node --test tests/*.test.js                 # 78 tests
 bash tests/check-site.test.sh               # 504
 bash tests/new.test.sh                      # 381
@@ -217,14 +222,14 @@ bash tests/names.test.sh                    # 9
 bash tests/backup.test.sh                   # 273
 bash tests/collect.test.sh                  # 366
 bash tests/fetch.test.sh                    # 377
-bash tests/pigeonhole.test.sh               # 391
-bash tests/e2e.sh                           # 417; needs Docker; not in CI
+bash tests/pigeonhole.test.sh               # 407
+bash tests/e2e.sh                           # 456; needs Docker; not in CI
 bash tests/compat-seo.sh wordpress-seo      # 6; needs Docker and the network; not in CI; never beside e2e.sh
 bash tests/backup-real.sh                   # 15; needs the real age (brew install age); not in CI
 bash tests/restore-real.sh                  # 31; needs Docker, mkcert and the real age; not in CI
 bash tests/collect-real.sh                  # 20; needs the real age; not in CI
 bash tests/pigeonhole-real.sh               # 16; needs node, npm, the real age and the network; not in CI
-bash tests/rehearsal.sh                     # 121; needs Docker, node, the real age and ssh, and the network; not in CI;
+bash tests/rehearsal.sh                     # 123; needs Docker, node, the real age and ssh, and the network; not in CI;
                                             # never beside e2e.sh or compat-seo.sh
 bash tests/site.test.sh SITE_DIR            # needs a real, running site; not in CI
 ```

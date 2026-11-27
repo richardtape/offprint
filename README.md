@@ -77,7 +77,7 @@ detail.
   an exact Offprint version; anywhere to send the backup but the site's own repository.
 - Comments need a web server of your own in front of the site and a second small machine beside it; on a host
   that only takes files they are closed, and a form has nowhere to post (the export warns). The whole of it is built
-  and has run with the real programs in Docker, not yet on a real server:
+  and has run on one real site, once, and with the real programs in Docker:
   [what is built](docs/reference.md#comments-pigeonhole-what-is-built). Search, and any page address
   with a query string, is not exported. Only the main feed is.
 - Every publish crawls the whole site again. A page that is in no sitemap and linked from nowhere is missed.

@@ -292,8 +292,9 @@ hold and posts it to one path of the site's own address; your web server passes 
 which nothing on the internet can reach; your Mac fetches it over ssh, and, when you ask, opens it and hands it to
 WordPress, where it waits in the moderation queue. An approved comment shows at the next publish.
 
-**Every part is built, and the whole has been run with the real programs in Docker
-(`tests/rehearsal.sh`: Caddy, sshd, the store, the fetch, a real WordPress). It has not yet run on a real server.**
+**Every part is built. The whole has run on one real site, once (27 November 2026; what ran, and what did not, is
+[below](#not-built-and-what-has-run-for-real)), and with the real programs in Docker (`tests/rehearsal.sh`: Caddy,
+sshd, the store, the fetch, a real WordPress). Take it as that and no more.**
 It needs a web server of your own in front of the site (one that can pass a path on) and a second, small machine on
 a private network with it; a host that only takes files can't take comments, and neither built-in adapter says it
 can. Nothing here is "end-to-end encrypted": a comment is encrypted in the visitor's browser to a key only the
@@ -405,14 +406,21 @@ request can be told from a visitor's, and it does not read the bytes of the page
 that adds a script of its own to your pages (an analytics beacon, say) will set it off, rightly: that script can
 read what is typed there.
 
-### Not built, and not yet tried
+### Not built, and what has run for real
 
 - Not built: a command that replaces the daily key (add the new one beside the old by hand: `age` tries each);
   a second site on one store's machine (the server is laid out for it: an instance a site); a trained spam filter;
   a daily test submission; avatars served from the site; forms other than comments.
-- Not yet tried on a real server: the systemd unit and its limits (written by the printed script; read by
-  `systemd-analyze verify` in the rehearsal, never started there), the firewall lines, and a proxy in front of the
-  web server.
+- Run for real, once, on one site (27 November 2026): the store on Ubuntu 24.04 (node 18.19, systemd 255) under its
+  unit and behind the printed firewall lines; Caddy on a second machine, behind a proxy, passing the path on; the
+  user the Mac's ssh passes through, and sshd's rule for it; `keys`; a `doctor` with every line `ok:`; a publish
+  whose look at the live site found nothing changed; and one comment, from a phone: fetched by the agent, with its
+  notification, opened from the admin bar, held, approved, published, then removed and published again.
+- Not yet tried for real: the per-address limit behind a proxy (that the store counts the visitor's address, not
+  the proxy's); a comment opened with the recovery key; a reply to a comment; a fetch while the login Keychain is
+  locked; and any system but that one for the store. Its unit is strict about what node may ask of the kernel, and a
+  node or a systemd it has not met may need a line added: the set-up script says when the store didn't stay up, and
+  where to look.
 - The notification is shown by macOS's `osascript`, so macOS says it is from Script Editor.
 
 ## Publishing to Cloudflare Workers

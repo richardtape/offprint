@@ -143,8 +143,8 @@ gets no shell; set-up makes the key; set-up does the server's side itself over t
 each command and asking first, with an undo; the server's host key is pinned in `site.json` and never learnt
 during a publish; Caddy is documented first.
 
-**Pigeonhole: comments on a static site.** Approved by the owner on 26 November 2026, built in six stages, of which
-five are done; it is here, not above, because it has not yet run on a real server. A visitor's browser encrypts a
+**Pigeonhole: comments on a static site.** Approved by the owner on 26 November 2026, and built in six stages; it is
+still here because it has run on one real site only (the owner's own, on 27 November 2026). A visitor's browser encrypts a
 comment to keys only the owner holds and posts it to one path of the site's own origin; the web server forwards it
 to a store on a private network; the Mac fetches it over ssh, opens it when the owner asks, and hands it to
 WordPress, where it waits in the moderation queue; an approved comment shows at the next publish. The parts:
@@ -158,15 +158,23 @@ asks); the admin bar's (`Comments_View.php`); and the publish's look at the live
 (`check_live_comments` in `bin/publish`, with `bin/check-live-page.php`). `ADAPTER_PIGEONHOLE` is how an adapter says its host forwards the path,
 and no adapter of the tool's sets it. Decided: fetched on a schedule but opened only when the owner asks; held
 always; no email about a comment; avatars off; moderating asks for no publish; the visitor's address goes to the
-store for a limit held in memory only. Left: one security review of the whole, then the first real run, on the
-owner's own site, done with the owner.
+store for a limit held in memory only. One security review of the whole was made before the real run (one important
+finding, in the import: a bare address in a comment's words; fixed), and the real run was done with the owner, a
+step at a time.
 
-`tests/rehearsal.sh` is the nearest thing to that real run, and the place to try any change to this: real Caddy,
+`tests/rehearsal.sh` is the nearest thing to a real run, and the place to try any change to this: real Caddy,
 sshd, node, ssh, `age` and WordPress, in Docker. It found what the stand-ins could not (ssh runs the hop's command
 through the owner's own shell, and zsh reads an unquoted `[%h]:%p` as a file pattern), which is the usual lesson
 here: a stand-in is only as true as the last real run it was checked against. It also showed that a key's own
 line in `authorized_keys` can't forbid a listening socket (`ssh -R /path`), which the reviewer suspected and no
 reading could settle: hence the sshd rule the web server's commands now make.
+
+The real run then found what the rehearsal could not, in the one part Docker never starts: the store under systemd.
+The unit's `SystemCallFilter` left out a call node makes as it starts (`pkey_alloc`), so the store was killed at
+every start; and the set-up script called it "running", having looked once, two seconds after a start, at a unit
+systemd was starting again every five. Both are fixed, and `tests/pigeonhole.test.sh` holds the second with a
+stand-in `systemctl`; but no test starts the unit under a real systemd, so a new node or a new systemd can do the
+same again. After any change to the unit, or on a system it has not met, look at `systemctl status` a minute later.
 
 Also deferred until something needs it: a WordPress filter that lets a site add its own starting addresses.
 
@@ -234,11 +242,15 @@ Check each is still true before relying on it or fixing it.
   until its own cache lets go.
 - Pigeonhole: `bin/check-site-pigeonhole.php` reads every page with the HTML parser a second time (the address
   check reads each first), which a site of many thousands of pages will feel.
-- Pigeonhole has run whole only in Docker (`tests/rehearsal.sh`). Never run for real: the store's systemd unit
-  (written and read by `systemd-analyze verify`, never started), the firewall lines the set-up prints, a proxy in
-  front of the web server (the per-address limit depends on the web server knowing the visitor's address behind it),
-  a fetch started by the agent while the login Keychain is locked, and the notification under launchd with the new
-  code (shown once by hand, in stage 1).
+- Pigeonhole has run whole on one real site, once (27 November 2026; `docs/reference.md` lists what ran), and in
+  Docker (`tests/rehearsal.sh`). The store's unit has started under one systemd only (255, Ubuntu 24.04, node 18.19):
+  no test starts it under a real one. Never run for real: the per-address limit with a proxy in front of the web
+  server (posts arrive through one; that the store counts the visitor's address and not the proxy's was not shown),
+  a fetch started by the agent while the login Keychain is locked, a comment opened with the recovery key, a reply
+  to a comment, and the things the pull key must not get, asked of real servers (the rehearsal asks its own).
+- Pigeonhole: a site with the block that publishes no page with a comment form (every post's comments closed, or a
+  theme that prints no form) is told nothing by the publish: there is nothing for the look at the live site to look
+  at, and no line says so.
 - Pigeonhole: a fetch makes one ssh connection for each file it takes and another to remove it, through the jump.
   Fine for a blog; a site that gets hundreds between fetches will want one connection for all.
 - Pigeonhole: a file on the store that is not what its name says is left there and counted at every fetch until the

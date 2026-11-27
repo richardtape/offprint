@@ -199,8 +199,8 @@ tests/                        every suite (tests/php, tests/fixtures, *.test.sh,
   block, the fetch, `offprint collect`, the import, `offprint pigeonhole keys`, `print-server` and `doctor`, the
   agent's and the admin bar's parts), the page's side (the form on an exported page, the two scripts, the checks of
   both, the look at the live site after "Live") and the server's (`pigeonhole/server/`: the store, its pull command
-  and its set-up script). It has run whole only in Docker (`tests/rehearsal.sh`), never on a real server: say so
-  wherever it is described. A publish refuses a site with a `pigeonhole` block unless its adapter sets
+  and its set-up script). It has run whole on one real site, the owner's own, once (27 November 2026: `docs/reference.md`
+  says exactly what ran and what did not), and in Docker (`tests/rehearsal.sh`): describe it as no more than that. A publish refuses a site with a `pigeonhole` block unless its adapter sets
   `ADAPTER_PIGEONHOLE=1`, and no adapter of the tool's does. Not built: any place to send the backup but the site's
   repository; the `ssh` adapter; a top-level `setup`, `doctor` or `upgrade`. Do not describe those as if they were.
 

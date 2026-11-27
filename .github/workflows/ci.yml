@@ -75,6 +75,14 @@ jobs:
         if: ${{ !cancelled() }}
         run: bash tests/collect.test.sh
 
+      - name: the fetch (comments) tests
+        if: ${{ !cancelled() }}
+        run: bash tests/fetch.test.sh
+
+      - name: offprint pigeonhole tests
+        if: ${{ !cancelled() }}
+        run: bash tests/pigeonhole.test.sh
+
       - name: offprint new tests
         if: ${{ !cancelled() }}
         run: bash tests/new.test.sh

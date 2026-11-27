@@ -3,6 +3,15 @@
 # changes, and every five minutes anyway. WordPress asks for a publish by writing var/inbox/publish-request;
 # this takes the request and runs bin/publish for the site.
 #   offprint agent
+# Comments (a site with a pigeonhole): on a start it first fetches what the site's pigeonhole holds, once
+# (bin/collect --fetch-only --notify), unless a fetch ran in the last four minutes. bin/collect bounds how long that
+# can take (lib/pigeonhole.sh), so a server that never answers can't keep this from a publish request for long. Only that: a fetch reads the pull key and never the daily key, and opens
+# nothing (the owner's decision, 26 November 2026). For a site that takes no comments that run does nothing and says
+# nothing. A fetch that fails is logged in one line, and not again while it goes on failing the same way (a Mac
+# that is offline for a day wakes this 288 times). Opening is asked for: WordPress writes var/inbox/collect-request
+# ("Check for comments" in the admin bar), which is taken exactly as a publish request is, and bin/collect runs. What
+# bin/collect prints is its own words and counts, never anything a visitor or a server sent, and its first line is
+# logged. WordPress is untrusted, so anything in it can ask for a collection; it can't read a key or anything unopened.
 # It works in the site folder (OFFPRINT_SITE, which the agent's plist sets; or else the one holding site.json at or
 # above where it starts), and runs bin/publish with OFFPRINT_SITE set to it. It needs only that folder, not
 # site.json's values, so not php.
@@ -23,6 +32,7 @@
 # nothing runs. Other files in the inbox are never run.
 #   PUBLISH_AGENT_PUBLISH           a bash script to run (with /bin/bash) instead of bin/publish (tests/agent.test.sh uses a
 #                                   stand-in)
+#   PUBLISH_AGENT_COLLECT           and one to run instead of bin/collect
 #   PUBLISH_AGENT_BACKOFF_SECONDS   how long to wait while another publish holds the lock (default 30)
 #   PUBLISH_AGENT_BUSY_MAX_SECONDS  how long to keep waiting for it (default 2100, 35 minutes)
 #   PUBLISH_AGENT_MIN_SECONDS       the shortest it stays, watching for requests (default 11; see below)
@@ -39,9 +49,11 @@ export OFFPRINT_SITE="$SITE"
 VAR="$SITE/var"; INBOX="$VAR/inbox"; REQUEST="$VAR/inbox/publish-request"; LOG="$VAR/publish.log"
 # In var/, which WordPress can only read: where a request from the inbox is checked, and where a good one
 # waits until a publish has run for it.
-TAKEN="$VAR/.publish-request.taken"
 WAITING="$VAR/publish-waiting"
 PUBLISH="${PUBLISH_AGENT_PUBLISH:-$TOOL/bin/publish}"
+COLLECT="${PUBLISH_AGENT_COLLECT:-$TOOL/bin/collect}"
+COLLECT_REQUEST="$VAR/inbox/collect-request"; COLLECT_WAITING="$VAR/collect-waiting"
+FETCH_STATUS="$VAR/pigeonhole-fetch.json"
 BUSY=75   # bin/publish's exit code when another publish holds the lock
 BACKOFF="${PUBLISH_AGENT_BACKOFF_SECONDS:-30}"
 BUSY_MAX="${PUBLISH_AGENT_BUSY_MAX_SECONDS:-2100}"
@@ -71,41 +83,65 @@ parse() {
   [ -n "$reason" ] || reason="unknown"
 }
 
-# take: moves the request out of the inbox and checks it. A good one becomes var/publish-waiting (its time
-# and cleaned reason, nothing else) and take returns 0; anything else is removed, logged in one line, and
-# take returns 1. Either way the inbox no longer has it, so a request written from now on is a new one.
+# take REQUEST WAITING: moves that request out of the inbox and checks it. A good one becomes WAITING (its time and
+# cleaned reason, nothing else: var/publish-waiting, or var/collect-waiting) and take returns 0; anything else is
+# removed, logged in one line, and take returns 1. Either way the inbox no longer has it, so a request written from
+# now on is a new one.
 take() {
-  local why=""
-  rm -rf "$TAKEN"
-  if ! mv -f "$REQUEST" "$TAKEN" 2>/dev/null; then
-    log "couldn't take var/inbox/publish-request; nothing ran"
+  local request="$1" waiting="$2" why="" name="${1##*/}" taken
+  taken="$VAR/.$name.taken"
+  rm -rf "$taken"
+  if ! mv -f "$request" "$taken" 2>/dev/null; then
+    log "couldn't take var/inbox/$name; nothing ran"
     return 1
   fi
-  if [ -L "$TAKEN" ]; then
+  if [ -L "$taken" ]; then
     why="a symlink"
-  elif [ -z "$(find "$TAKEN" -maxdepth 0 -type f 2>/dev/null)" ]; then
+  elif [ -z "$(find "$taken" -maxdepth 0 -type f 2>/dev/null)" ]; then
     why="not a plain file"
-  elif [ -z "$(find "$TAKEN" -maxdepth 0 -type f -size -1025c 2>/dev/null)" ]; then
+  elif [ -z "$(find "$taken" -maxdepth 0 -type f -size -1025c 2>/dev/null)" ]; then
     why="larger than 1 KB"
   fi
   if [ -n "$why" ]; then
-    rm -rf "$TAKEN"   # on a link, the link itself; a folder's contents are removed, never followed
-    log "var/inbox/publish-request was $why, so it was removed and nothing ran"
+    rm -rf "$taken"   # on a link, the link itself; a folder's contents are removed, never followed
+    log "var/inbox/$name was $why, so it was removed and nothing ran"
     return 1
   fi
-  parse "$(head -c 200 "$TAKEN" | head -n 1)"
+  parse "$(head -c 200 "$taken" | head -n 1)"
   # A new file, not the taken one rewritten (that could be a hard link to another file in the inbox).
-  rm -f "$TAKEN"
-  printf '%s\n' "${asked:+$asked }$reason" > "$TAKEN" && mv -f "$TAKEN" "$WAITING"
-  rm -f "$TAKEN"
-  [ -f "$WAITING" ]
+  rm -f "$taken"
+  printf '%s\n' "${asked:+$asked }$reason" > "$taken" && mv -f "$taken" "$waiting"
+  rm -f "$taken"
+  [ -f "$waiting" ]
+}
+
+# first_line TEXT: its first line, as it may go in the log: no control character, 300 characters at most.
+first_line() { printf '%s\n' "$1" | head -n 1 | LC_ALL=C tr '\001-\011\013-\037\177' '?' | cut -c1-300; }
+# fetch_failing: the one fixed word var/pigeonhole-fetch.json gives for a fetch that failed, or nothing. (The file is
+# bin/collect's, in var/, which WordPress can only read; no more of it is used than that word.)
+fetch_failing() {
+  [ -f "$FETCH_STATUS" ] && [ ! -L "$FETCH_STATUS" ] || return 0
+  head -c 400 "$FETCH_STATUS" 2>/dev/null | LC_ALL=C sed -n 's/.*"ok":false.*"reason":"\([a-z-]\{0,30\}\)".*/failing \1/p' | head -n 1
+}
+# fetch: what the site's pigeonhole holds, to this Mac, opening nothing (see the top). Its failure is logged once.
+fetch() {
+  local before after out rc=0
+  # Not when one ran within the last four minutes: WordPress can start this as often as it writes to the inbox, and
+  # each fetch reads the Keychain and logs in to the owner's two servers. (The file's time is bin/collect's own.)
+  if [ -f "$FETCH_STATUS" ] && [ ! -L "$FETCH_STATUS" ] && [ -n "$(find "$FETCH_STATUS" -maxdepth 0 -mmin -4 2>/dev/null)" ]; then return 0; fi
+  before="$(fetch_failing)"
+  out="$(/bin/bash "$COLLECT" --fetch-only --notify 2>&1 < /dev/null | head -c 4000; exit "${PIPESTATUS[0]}")" || rc=$?
+  [ "$rc" = 1 ] || return 0   # (0: done, or no comments here. 75: another run has the spool. 2: site.json, which a publish reports.)
+  after="$(fetch_failing)"
+  [ -n "$after" ] && [ "$after" = "$before" ] || log "fetching comments: $(first_line "$out")"
 }
 
 mkdir -p "$VAR"
 # WordPress writes the request beside it first, then renames it into place; one that failed may be left.
 if [ -d "$INBOX" ] && [ ! -L "$INBOX" ]; then
-  find "$INBOX" -maxdepth 1 -type f -name '.publish-request.*' -mmin +10 -exec rm -f {} + 2>/dev/null
+  find "$INBOX" -maxdepth 1 -type f \( -name '.publish-request.*' -o -name '.collect-request.*' \) -mmin +10 -exec rm -f {} + 2>/dev/null
 fi
+fetch
 start=$SECONDS
 runs=0
 busy_since=""
@@ -153,6 +189,35 @@ while :; do
     runs=$((runs + 1))
     continue
   fi
+  if [ -f "$COLLECT_WAITING" ]; then
+    if [ "$runs" -ge "$MAX_RUNS" ]; then
+      log "stopping after $MAX_RUNS runs in a row; the request waiting now is left for the next start"
+      break
+    fi
+    parse "$(head -c 200 "$COLLECT_WAITING" | head -n 1)"
+    [ -n "$busy_since" ] || log "checking for comments (asked${asked:+ at $asked}: $reason)"
+    rc=0
+    said="$(/bin/bash "$COLLECT" 2>&1 < /dev/null | head -c 4000; exit "${PIPESTATUS[0]}")" || rc=$?
+    if [ "$rc" -eq "$BUSY" ]; then
+      # A publish, or another fetch, holds a lock. As for a publish: the request stays, touched, and this tries again.
+      touch "$COLLECT_WAITING"
+      if [ -z "$busy_since" ]; then
+        busy_since=$SECONDS
+        log "a publish or a fetch is running; trying again every $BACKOFF seconds, for up to $((BUSY_MAX / 60)) minutes"
+      fi
+      if [ $((SECONDS - busy_since)) -ge "$BUSY_MAX" ]; then
+        log "giving up for now: a lock has been held for $((BUSY_MAX / 60)) minutes; the request waits in var/collect-waiting for the next start"
+        break
+      fi
+      sleep "$BACKOFF"
+      continue
+    fi
+    log "comments: $(first_line "${said:-offprint collect said nothing (it ended with status $rc)}")"
+    rm -f "$COLLECT_WAITING"
+    busy_since=""
+    runs=$((runs + 1))
+    continue
+  fi
   if [ -e "$REQUEST" ] || [ -L "$REQUEST" ]; then
     if [ "$runs" -ge "$MAX_RUNS" ]; then
       log "stopping after $MAX_RUNS runs in a row; the request waiting now is left for the next start"
@@ -160,7 +225,16 @@ while :; do
     fi
     sleep "$SETTLE"
     # A refused request counts as a run, so a stream of them can't keep this going either.
-    take || runs=$((runs + 1))
+    take "$REQUEST" "$WAITING" || runs=$((runs + 1))
+    continue
+  fi
+  if [ -e "$COLLECT_REQUEST" ] || [ -L "$COLLECT_REQUEST" ]; then
+    if [ "$runs" -ge "$MAX_RUNS" ]; then
+      log "stopping after $MAX_RUNS runs in a row; the request waiting now is left for the next start"
+      break
+    fi
+    sleep "$SETTLE"
+    take "$COLLECT_REQUEST" "$COLLECT_WAITING" || runs=$((runs + 1))
     continue
   fi
   [ $((SECONDS - start)) -ge "$MIN_SECONDS" ] && break

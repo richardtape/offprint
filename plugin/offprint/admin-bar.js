@@ -8,6 +8,9 @@
  * saved or failed, whatever its state is called), when it is refused (logged out, or the nonce has expired), or
  * after three failed tries in a row. In the block editor, where the page stays put while posts are saved,
  * it also looks again after each save. Everything from the server goes into the page as text, never as HTML.
+ * For a site that takes comments the answer has a `comments` part too ({ label, lines }): how many wait to be
+ * checked, beside the title, and the lines above the "Check for comments" button. The view's `poll` is true while
+ * a check for comments is waiting as well, so the node follows it to its end the same way.
  *
  * Tested by tests/admin-bar.test.js (node --test).
  */
@@ -43,19 +46,34 @@
 			node.classList.remove( tone );
 		} );
 		node.classList.add( 'offprint-' + view.tone );
-		Array.prototype.forEach.call( list.querySelectorAll( '.offprint-line' ), function ( old ) {
+		lines( list, 'offprint-line', view.lines, button );
+		if ( view.comments ) {
+			var count = node.querySelector( '.offprint-count' );
+			var collect = document.getElementById( 'wp-admin-bar-offprint-collect' );
+			if ( count && count.textContent !== view.comments.label ) {
+				count.textContent = view.comments.label;
+			}
+			if ( collect ) {
+				lines( list, 'offprint-comments-line', view.comments.lines, collect );
+			}
+		}
+	}
+
+	// The lines of one kind (a class name) under the node, replaced by these texts, just above one of its buttons.
+	function lines( list, name, texts, before ) {
+		Array.prototype.forEach.call( list.querySelectorAll( '.' + name ), function ( old ) {
 			old.parentNode.removeChild( old );
 		} );
-		view.lines.forEach( function ( text ) {
+		( texts || [] ).forEach( function ( text ) {
 			var item = document.createElement( 'li' );
 			var line = document.createElement( 'div' );
-			item.className = 'offprint-line';
+			item.className = name;
 			item.setAttribute( 'role', 'group' );
 			line.className = 'ab-item ab-empty-item';
 			line.setAttribute( 'role', 'menuitem' );
 			line.textContent = text;
 			item.appendChild( line );
-			list.insertBefore( item, button );
+			list.insertBefore( item, before );
 		} );
 	}
 

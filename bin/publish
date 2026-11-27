@@ -260,6 +260,7 @@ cleanup() {
   # it, and the adapter's private folder (lib/adapter.sh: the copy of adapter.sh, any answer) goes, on every exit.
   for p in ${cpid:-} ${ghpid:-} ${OFFPRINT_ADAPTER_PID:-}; do kill -0 "$p" 2>/dev/null && kill_tree "$p"; done
   offprint_adapter_cleanup
+  [ -z "${LIVE_DIR:-}" ] || rm -rf "$LIVE_DIR"   # what check_live_comments fetched
   if [ "$HAVE_LOCK" = 1 ]; then
     [ "$FINAL" = 1 ] || status failed "The publish stopped unexpectedly; see var/publish.log" final >/dev/null
     [ -d site ] || { [ -d site.old ] && mv site.old site; }
@@ -866,6 +867,105 @@ hint() {
   HINT="$(head -c 4096 "$OFFPRINT_ADAPTER_TMP/hint.out" 2>/dev/null | head -n 1 | printable | cut -c1-200)"
   rm -f "$OFFPRINT_ADAPTER_TMP/hint.out"
 }
+# check_live_comments: once the live site serves this publish, is what a visitor is handed for a comment still what
+# was published? (The owner's decision, 26 November 2026.) A comment is typed into a page, and encrypted in the
+# visitor's browser to the keys that page names, by the script that page loads: whoever can change any of it on its
+# way (the web server, or a proxy in front of it) reads every comment from then on, and the checks before the commit
+# cannot see that. So one page that has a comment form, and the two scripts, are fetched from the public site as any
+# visitor fetches them, and three things are asked of them:
+#   - the same check an export is given before it may be committed (bin/check-site-pigeonhole.php: the page's
+#     settings are exactly site.json's path and keys, its form can't post by itself, nothing else sends to the path,
+#     and each of the two scripts is the tool's own, byte for byte);
+#   - that the page still has the comment form's settings at all;
+#   - that the page runs the scripts the published page runs, and no others (bin/check-live-page.php): one script
+#     added to the page reads a comment as it is typed, whatever keys the page names.
+# Anything found is said loudly, as an "Action needed:" warning (the admin bar turns red), and the publish stays
+# live: nothing is undone, since the files that were published are right; what is wrong is somewhere between them
+# and the visitor. So is a live site that answers one of the three with an error, or with far more than was
+# published: it was just confirmed to serve this publish, which has all three. Only when the site can't be reached
+# at all is it a plain warning that nothing could be checked.
+# What it does not see: a change made for some visitors only (this request can be told from a visitor's); another
+# page than the one asked for (the first by name); another script file of the page's changed under its own address;
+# script in an attribute. It is a tripwire for a change that lasts, not a proof.
+# What the live site answers is data: no more than LIVE_MAX_BYTES of each file is read, into a private folder of
+# this run's that is removed afterwards, and none of it is run, logged or shown: the words are this tool's own.
+LIVE_DIR=""; LIVE_MAX_BYTES=4194304
+check_live_comments() {
+  [ -n "$SITE_PIGEONHOLE_PATH" ] && [ "$ADAPTER_NAME" != none ] || return 0
+  local page="" f url rc out said size any=0 name_re='^site/[A-Za-z0-9._/-]+$'
+  local scripts="wp-content/mu-plugins/offprint/pigeonhole.js wp-content/mu-plugins/offprint/pigeonhole-loader.js"
+  local between="The files published are right: something between them and your visitors changed what is served (the host, or a proxy in front of it), or still serves an older copy. Find out which before trusting the comment form."
+  # The first page of this commit that carries a comment form's settings, by a name plain enough to ask for.
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    any=1; f="${f#"$COMMIT":}"
+    if [[ "$f" =~ $name_re ]] && [[ "$f" != *..* ]]; then page="${f#site/}"; break; fi
+  done <<EOT
+$(git grep -l -F -e 'id="offprint-pigeonhole"' "$COMMIT" -- 'site/*.html' 2>/dev/null < /dev/null | LC_ALL=C sort | head -n 200)
+EOT
+  if [ -z "$page" ]; then
+    # (a site none of whose posts takes comments has nothing to look at; one whose pages' names can't be asked for
+    # plainly has, and it wasn't looked at: said)
+    [ "$any" = 0 ] || warn "Warning: the live site's comment form couldn't be checked: no page with a comment form has a name of plain letters, digits, dots and dashes to ask the live site for."
+    return 0
+  fi
+  if ! offprint_private_dir offprint-live LIVE_DIR; then
+    warn "Warning: the live site's comment form couldn't be checked (no private folder could be made for it); the next publish checks it."
+    return 0
+  fi
+  for f in "$page" $scripts; do
+    case "$f" in index.html) url="$SITE_PUBLIC_URL/" ;; */index.html) url="$SITE_PUBLIC_URL/${f%index.html}" ;; *) url="$SITE_PUBLIC_URL/$f" ;; esac
+    mkdir -p "$LIVE_DIR/site/$(dirname "$f")"
+    # (?p= makes each question a new address, so no cache answers it; one byte past the limit tells a longer file)
+    curl -fsS --max-time 15 "$url?p=$PUBLISH_ID" 2>> "$LOG" < /dev/null | head -c $((LIVE_MAX_BYTES + 1)) > "$LIVE_DIR/site/$f"
+    rc="${PIPESTATUS[0]}"
+    size="$(wc -c < "$LIVE_DIR/site/$f" 2>/dev/null | tr -d ' ')"
+    case "$size" in ''|*[!0-9]*) size=0; [ "$rc" != 0 ] || rc=1 ;; esac
+    # Its size first: curl fails too when no more of a long answer is taken, and that is not "couldn't be reached".
+    if [ "$size" -gt "$LIVE_MAX_BYTES" ]; then
+      rm -rf "$LIVE_DIR"; LIVE_DIR=""
+      warn "Action needed: the live site is not serving the comment form this publish made (it answers /$f with something far larger than what was published). A comment sent from the live site now may be readable by someone else, or reach nobody. $between"
+      return 0
+    elif [ "$rc" = 22 ]; then
+      # The live site answered, with an error, for a file of the publish it was just confirmed to serve.
+      rm -rf "$LIVE_DIR"; LIVE_DIR=""
+      warn "Action needed: the live site is not serving the comment form this publish made (it answers /$f with an error, where the publish has that file). Nobody can comment as it is served, or the answer differs for this Mac. $between"
+      return 0
+    elif [ "$rc" != 0 ]; then
+      rm -rf "$LIVE_DIR"; LIVE_DIR=""
+      warn "Warning: the live site's comment form couldn't be checked ($SITE_PUBLIC_HOST couldn't be reached for /$f; see var/publish.log); the next publish checks it."
+      return 0
+    fi
+  done
+  # The page that was published has a comment form's settings; the one served must have them still.
+  if ! grep -qF -e 'id="offprint-pigeonhole"' "$LIVE_DIR/site/$page" 2>/dev/null; then
+    rm -rf "$LIVE_DIR"; LIVE_DIR=""
+    warn "Action needed: the live site is not serving the comment form this publish made (/$page has no comment form's settings there, and has them here). Nobody can comment on it as it is served. $between"
+    return 0
+  fi
+  out="$(cd "$LIVE_DIR/site" && CHECK_SITE_PIGEONHOLE_PATH="$SITE_PIGEONHOLE_PATH" CHECK_SITE_PIGEONHOLE_RECIPIENTS="$SITE_PIGEONHOLE_RECIPIENTS" \
+    CHECK_SITE_HOST="$SITE_PUBLIC_HOST" php "$TOOL/bin/check-site-pigeonhole.php" . "$TOOL/plugin/offprint" 2>&1 < /dev/null)"; rc=$?
+  if [ "$rc" != 0 ] && [ -z "$out" ]; then out="the check could not run"; fi
+  if [ -z "$out" ]; then
+    # The scripts the page runs: those of the page as it was committed, and no others.
+    if git cat-file blob "$COMMIT:site/$page" > "$LIVE_DIR/published.html" 2>> "$LOG" < /dev/null; then
+      out="$(php "$TOOL/bin/check-live-page.php" "$LIVE_DIR/published.html" "$LIVE_DIR/site/$page" 2>&1 < /dev/null)"; rc=$?
+      if [ "$rc" != 0 ] && [ -z "$out" ]; then out="the page's scripts could not be compared"; fi
+      [ -z "$out" ] || out="$page: $out"
+    else
+      out="the published page could not be read back from the commit"
+    fi
+  fi
+  rm -rf "$LIVE_DIR"; LIVE_DIR=""
+  if [ -n "$out" ]; then
+    said="$(printf '%s\n' "$out" | head -n 1 | printable | cut -c1-300)"
+    printf '%s\n' "$out" | head -n 20 | printable >> "$LOG"
+    warn "Action needed: the live site is not serving the comment form this publish made ($said). A comment sent from the live site now may be readable by someone else, or reach nobody. $between"
+  else
+    log "the live site serves the comment form, its scripts and the page's own as they were published (/$page)"
+  fi
+  return 0
+}
 # deploy_and_confirm: the host makes COMMIT live (adapter_deploy), then the live site is asked until it serves it
 # (adapter_confirm), for up to TIMEOUT seconds; the publish ends there, whichever way. Nothing is undone when either
 # fails: the commit stays, and stays on GitHub, and the status says exactly which step failed, as "COMMIT is pushed,
@@ -891,6 +991,7 @@ deploy_and_confirm() {
   done
   said_live
   [ "$ADAPTER_NAME" != none ] || finish saved "$(ending "Committed and pushed ${COMMIT:0:7}; this site has no host set up (site.json \"adapter\")")"
+  check_live_comments
   finish live "The site is live at ${COMMIT:0:7}${STALE:+, but $STALE}"
 }
 # GitHub again: it may have moved since the check before the export. (The push itself would refuse too.)
@@ -920,6 +1021,7 @@ if [ "$committed" = 0 ] && [ "$unpushed" = 0 ]; then
   # A site with no host (the adapter none) has no live site to be unchanged on, which the admin bar would show as Live:
   # it ends "saved", as its first publish did.
   [ "$ADAPTER_NAME" != none ] || finish saved "$(ending "Nothing has changed since the last publish; this site has no host set up (site.json \"adapter\")")"
+  check_live_comments
   finish unchanged "$(ending "Nothing has changed since the last publish")"
 fi
 

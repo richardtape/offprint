@@ -1,0 +1,32 @@
+# Used only by tests/rehearsal.sh, as the project "offprint-rehearsal": a web server (Caddy and sshd) and a store
+# (sshd; the store itself is set up by the script Offprint prints) on a private network of their own. The store has
+# no published port and no way out: only the web server reaches it. The web server's two ports are published on
+# 127.0.0.1 only, at ports Docker picks.
+services:
+  web:
+    build: .
+    restart: "no"
+    command: ["/bin/sh", "-c", "ssh-keygen -A > /dev/null && /usr/sbin/sshd && exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile"]
+    ports:
+      - "127.0.0.1::80"
+      - "127.0.0.1::22"
+    volumes:
+      - ${REHEARSAL_SERVED:?set by tests/rehearsal.sh}:/srv:ro
+    networks:
+      front: {}
+      private:
+        ipv4_address: 10.213.77.2
+  store:
+    build: .
+    restart: "no"
+    command: ["/bin/sh", "-c", "ssh-keygen -A > /dev/null && exec /usr/sbin/sshd -D -e"]
+    networks:
+      private:
+        ipv4_address: 10.213.77.5
+networks:
+  front: {}
+  private:
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.213.77.0/24

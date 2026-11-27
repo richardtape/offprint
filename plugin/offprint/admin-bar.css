@@ -1,6 +1,7 @@
 /*
  * The "Publish Site" node in the admin bar: a dot (green live, amber publishing or asked, red failed or
- * stuck, grey otherwise), long lines wrapped, and the button. Printed inline by Offprint\Admin_Bar.
+ * stuck, grey otherwise), long lines wrapped, and the buttons (Publish Site and, for a site that takes comments,
+ * Check for comments, under the lines that say how many wait). Printed inline by Offprint\Admin_Bar.
  */
 #wpadminbar .offprint-dot {
 	display: inline-block;
@@ -24,7 +25,8 @@
 	background: #f86368;
 }
 
-#wpadminbar #wp-admin-bar-offprint .offprint-line .ab-item {
+#wpadminbar #wp-admin-bar-offprint .offprint-line .ab-item,
+#wpadminbar #wp-admin-bar-offprint .offprint-comments-line .ab-item {
 	height: auto;
 	width: max-content;
 	max-width: 32em;

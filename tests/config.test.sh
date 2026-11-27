@@ -359,6 +359,63 @@ newsite; ph '"/_pigeonhole"' "[\"$Q62\",\"$Q62\"]";       refused_text "pigeonho
 newsite; with "\"pigeonhole\":{\"path\":\"/_pigeonhole\",\"recipients\":[\"$Q62\"],\"colour\":1}"; refused_text "an unknown key in the pigeonhole block" 'site.json: "pigeonhole.colour" is not a known field.'
 newsite; with "\"pigeonhole\":{\"path\":\"/a\",\"path\":\"/b\",\"recipients\":[\"$Q62\"]}"; refused_text "path twice in the pigeonhole block" 'site.json: "pigeonhole.path" appears more than once'
 newsite; with "\"pigeonhole\":{\"path\":\"/a\",\"recipients\":[\"$Q62\"]},\"pigeonhole\":{\"path\":\"/b\",\"recipients\":[\"$Q62\"]}"; refused_text "the pigeonhole key twice" 'site.json: "pigeonhole" appears more than once'
+# the pigeonhole's server: where the Mac fetches from. Four fields, all or none, each held to one way of writing it; both
+# host keys are pinned here and never learnt, so nothing loose may pass for one.
+HK1="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI$(printf 'A%.0s' $(seq 1 43))"
+HK2="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI$(printf 'B%.0s' $(seq 1 43))"
+phs() { with "\"pigeonhole\":{\"path\":\"/_pigeonhole\",\"recipients\":[\"$Q62\"]$1}"; }
+srv() { phs ",\"server\":${1:-\"10.0.0.5\"},\"server_host_key\":${2:-\"$HK1\"},\"jump\":${3:-\"192.0.2.10\"},\"jump_host_key\":${4:-\"$HK2\"}${5:-}"; }
+server_lines() { printf '%s' "${expected_fixture/mysite.test/wp.local}
+SITE_PIGEONHOLE_PATH${TAB}/_pigeonhole
+SITE_PIGEONHOLE_RECIPIENTS${TAB}$Q62
+SITE_PIGEONHOLE_SERVER${TAB}$1
+SITE_PIGEONHOLE_SERVER_PORT${TAB}$2
+SITE_PIGEONHOLE_SERVER_HOST_KEY${TAB}$HK1
+SITE_PIGEONHOLE_JUMP${TAB}$3
+SITE_PIGEONHOLE_JUMP_PORT${TAB}$4
+SITE_PIGEONHOLE_JUMP_HOST_KEY${TAB}$HK2
+SITE_PIGEONHOLE_STORE_PORT${TAB}$5
+ADAPTER_NAME${TAB}none"; }
+newsite; srv; loads "a pigeonhole with its server: seven more lines, the ports their defaults" "$(server_lines 10.0.0.5 22 192.0.2.10 22 8788)"
+newsite; srv '' '' '' '' ',"server_port":2222,"jump_port":2200,"store_port":9000'
+loads "a pigeonhole server with all three ports given" "$(server_lines 10.0.0.5 2222 192.0.2.10 2200 9000)"
+newsite; srv '"fd00::5"' '' '"2001:db8::10"'; loads "a pigeonhole server and jump at IPv6 addresses" "$(server_lines fd00::5 22 2001:db8::10 22 8788)"
+addr_msg() { printf 'site.json: "pigeonhole.%s" must be an address (IPv4 like 10.0.0.5, or IPv6 in its shortest lowercase form), not a name.' "$1"; }
+for a in '"store.example.com"' '"localhost"' '"10.0.0.05"' '"10.0.0"' '"10.0.0.256"' '"10.0.0.5:22"' '"[fd00::5]"' '"FD00::5"' '"fd00:0::5"' '"fe80::1%en0"' '"::ffff:10.0.0.5"' '"10.0.0.5\n"' '"10.0.0.5 "' '"-oProxyCommand=x"' '""' '7' 'null' '["10.0.0.5"]'; do
+  newsite; srv "$a"; refused_text "a pigeonhole server of $(printf '%s' "$a" | cut -c1-24)" "$(addr_msg server)"
+  newsite; srv '' '' "$a"; refused_text "a pigeonhole jump of $(printf '%s' "$a" | cut -c1-24)" "$(addr_msg jump)"
+done
+key_msg_for() { printf 'site.json: "pigeonhole.%s" must be that machine'"'"'s Ed25519 host key, as ssh-ed25519, a space and its 68 characters, with nothing after them.' "$1"; }
+rsa="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQ$(printf 'A%.0s' $(seq 1 40))"
+private="-----BEGIN OPENSSH PRIVATE KEY-----SECRETSECRET"
+for k in "\"$HK1 root@store\"" "\"${HK1}A\"" "\"${HK1%A}\"" "\"${HK1%A}=\"" "\"$rsa\"" "\"${HK1#ssh-ed25519 }\"" "\"10.0.0.5 $HK1\"" "\"$HK1\\n\"" "\"$HK1\\n$HK2\"" "\"ssh-ed25519  ${HK1#ssh-ed25519 }\"" "\"$private\"" '""' '7' 'null' "[\"$HK1\"]"; do
+  newsite; srv '' "$k"; refused_text "a pigeonhole server_host_key of $(printf '%s' "$k" | cut -c1-30)" "$(key_msg_for server_host_key)"
+  newsite; srv '' '' '' "$k"; refused_text "a pigeonhole jump_host_key of $(printf '%s' "$k" | cut -c1-30)" "$(key_msg_for jump_host_key)"
+done
+newsite; srv '' "\"$private\""; run
+if ! contains "$err$out" "SECRETSECRET"; then ok "pigeonhole: a private key given as a host key is not repeated in the message"; else bad "pigeonhole: a private key was echoed ($err)"; fi
+for f in server server_host_key jump jump_host_key; do
+  case "$f" in server) v='"10.0.0.5"' ;; jump) v='"192.0.2.10"' ;; *) v="\"$HK1\"" ;; esac
+  newsite; phs ",\"$f\":$v"; run
+  missing=0; for g in server server_host_key jump jump_host_key; do [ "$g" = "$f" ] || { contains "$err" "site.json: \"pigeonhole.$g\" is required when the block names its server" && missing=$((missing + 1)); }; done
+  if [ "$code" -eq 2 ] && [ -z "$out" ] && [ "$missing" = 3 ]; then ok "refused: a pigeonhole with $f alone: the other three are asked for"; else bad "pigeonhole with $f alone (exit $code, out: $out, err: $err)"; fi
+done
+for f in server_port jump_port store_port; do
+  case "$f" in store_port) least=1024; low=1023 ;; *) least=1; low=0 ;; esac
+  for v in "$low" 65536 '"22"' 22.5 -1 null '[22]'; do
+    newsite; srv '' '' '' '' ",\"$f\":$v"; refused_text "a pigeonhole $f of $v" "site.json: \"pigeonhole.$f\" must be a JSON integer from $least to 65535."
+  done
+  newsite; phs ",\"$f\":2222"; refused_text "a pigeonhole $f with no server named" "site.json: \"pigeonhole.$f\" is given, but the block names no server"
+done
+newsite; srv '"10.0.0.5"' '' '"10.0.0.5"'; refused_text "a pigeonhole whose jump is its server" 'site.json: "pigeonhole.jump" must be another machine than "pigeonhole.server"'
+newsite; srv '"10.0.0.5"' '' '"10.0.0.5"' '' ',"jump_port":2200'; run
+if [ "$code" -eq 0 ]; then ok "the same address at two ssh ports is two machines (a forwarded port): allowed"; else bad "same address, two ports ($err)"; fi
+newsite; srv '' '' '' '' ',"server":"10.0.0.6"'; refused_text "server twice in the pigeonhole block" 'site.json: "pigeonhole.server" appears more than once'
+newsite; srv '' '' '' '' ',"user":"root"'; refused_text "an unknown key beside the server's" 'site.json: "pigeonhole.user" is not a known field.'
+newsite; with "\"pigeonhole\":{\"path\":\"/_pigeonhole\",\"recipients\":[\"$Q62\"]}"; run
+if [ "$code" -eq 0 ] && ! contains "$out" "SITE_PIGEONHOLE_SERVER" && ! contains "$out" "SITE_PIGEONHOLE_JUMP" && ! contains "$out" "SITE_PIGEONHOLE_STORE_PORT"; then ok "a pigeonhole that names no server: none of the seven lines"; else bad "no server lines ($out)"; fi
+newsite; put "{$base,\"pigeonhole\":{\"path\":\"/x\",\"recipients\":[7],\"server\":\"10.0.0.5\",\"server_host_key\":\"$HK1\",\"jump\":\"192.0.2.10\",\"jump_host_key\":\"$HK2\"}}"; run
+if [ "$code" -eq 2 ] && [ -z "$out" ]; then ok "a good server beside bad recipients: nothing is printed"; else bad "server beside bad recipients (exit $code, out: $out)"; fi
 newsite; put "{$base}"; head -c 70000 /dev/zero | tr '\0' ' ' >> "$site/site.json"
 refused_text "a file over 64 KB" '64'
 newsite; put "{$base}"; printf '\0' >> "$site/site.json"
@@ -502,6 +559,14 @@ shell_cases() {  # $1 = bash to test with
   newsite; put "{$base}"
   sh_out="$(cd / && SITE_PIGEONHOLE_PATH=/inherited SITE_PIGEONHOLE_RECIPIENTS=inherited OFFPRINT_SITE="$site" "$B" -c ". '$root/lib/site.sh'; offprint_find_site; offprint_load_site; printf '%s|%s' \"\$SITE_PIGEONHOLE_PATH\" \"\$SITE_PIGEONHOLE_RECIPIENTS\"" 2>&1)"
   if [ "$sh_out" = "|" ]; then ok "[$t] offprint_load_site, no pigeonhole block: both empty, whatever the environment held"; else bad "[$t] load no pigeonhole ($sh_out)"; fi
+  # the server's seven: set from the block, and empty (never inherited) when it names none
+  seven='printf "%s|" "$SITE_PIGEONHOLE_SERVER" "$SITE_PIGEONHOLE_SERVER_PORT" "$SITE_PIGEONHOLE_SERVER_HOST_KEY" "$SITE_PIGEONHOLE_JUMP" "$SITE_PIGEONHOLE_JUMP_PORT" "$SITE_PIGEONHOLE_JUMP_HOST_KEY" "$SITE_PIGEONHOLE_STORE_PORT"'
+  newsite; srv
+  sh_out="$(cd / && OFFPRINT_SITE="$site" "$B" -c ". '$root/lib/site.sh'; offprint_find_site; offprint_load_site; $seven" 2>&1)"
+  if [ "$sh_out" = "10.0.0.5|22|$HK1|192.0.2.10|22|$HK2|8788|" ]; then ok "[$t] offprint_load_site sets the seven values of a pigeonhole's server"; else bad "[$t] load pigeonhole server ($sh_out)"; fi
+  newsite; with "\"pigeonhole\":{\"path\":\"/_pigeonhole\",\"recipients\":[\"$Q62\"]}"
+  sh_out="$(cd / && SITE_PIGEONHOLE_SERVER=10.9.9.9 SITE_PIGEONHOLE_SERVER_PORT=1 SITE_PIGEONHOLE_SERVER_HOST_KEY=x SITE_PIGEONHOLE_JUMP=10.9.9.8 SITE_PIGEONHOLE_JUMP_PORT=2 SITE_PIGEONHOLE_JUMP_HOST_KEY=y SITE_PIGEONHOLE_STORE_PORT=3 OFFPRINT_SITE="$site" "$B" -c ". '$root/lib/site.sh'; offprint_find_site; offprint_load_site; $seven" 2>&1)"
+  if [ "$sh_out" = "|||||||" ]; then ok "[$t] offprint_load_site, a pigeonhole that names no server: all seven empty, whatever the environment held"; else bad "[$t] load no pigeonhole server ($sh_out)"; fi
   # adapter variables
   newsite; cp "$root/tests/fixtures/site.json" "$site/"
   sh_out="$(cd / && OFFPRINT_SITE="$site" "$B" -c ". '$root/lib/site.sh'; offprint_find_site; offprint_load_site; printf '%s|%s' \"\$ADAPTER_NAME\" \"\$(compgen -v | grep -c '^ADAPTER_SET_')\"" 2>&1)"

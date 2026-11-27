@@ -7,6 +7,10 @@
 #                                                both): OUT is the age header line, a line naming the recipients,
 #                                                a line that differs on every run (the real tool's output does), then
 #                                                IN's bytes. Its arguments are noted in STUB_DIR/age.calls.
+#   age -r RECIPIENT [-r RECIPIENT]              with no -o and no IN: "encrypts" its standard input to its standard
+#                                                output, in the same four parts, the third padded so that the whole
+#                                                is the size the real tool makes of a submission (8392 bytes to one
+#                                                recipient, 8490 to two) when the input is one (8192 bytes).
 #       age_fails: exits 1 and writes nothing.   age_empty: exits 0, OUT empty.   age_junk: exits 0, OUT is "junk".
 #   age -d -i - FILE                             "decrypts": reads the key from standard input (one line), and prints
 #                                                FILE from its fourth line on when the key is AGE-SECRET-KEY-1TEST, else
@@ -36,6 +40,15 @@ while [ $# -gt 0 ]; do
     *) in="$1"; shift ;;
   esac
 done
+if [ -n "$recipients" ] && [ -z "$out" ] && [ -z "$in" ]; then
+  [ ! -f "$STUB_DIR/age_fails" ] || { echo "age: error: a failure the test asked for" >&2; exit 1; }
+  n=0; for r in $recipients; do n=$((n + 1)); done
+  head="$(printf 'age-encryption.org/v1\n-> X25519 stand-in%s\n--- run ' "$recipients")"
+  pad=$(( 8392 + (n - 1) * 98 - 8192 - ${#head} - 1 ))
+  printf '%s%s\n' "$head" "$(printf '%*s' "$pad" '' | tr ' ' x)"
+  cat
+  exit 0
+fi
 [ -n "$recipients" ] && [ -n "$out" ] || { echo "the stand-in age: unexpected call" >&2; exit 99; }
 if [ -z "$in" ]; then in="$out.stdin"; cat > "$in"; trap 'rm -f "$in"' EXIT; fi
 [ -f "$in" ] || { echo "the stand-in age: unexpected call" >&2; exit 99; }

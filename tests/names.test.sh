@@ -57,7 +57,7 @@ fi
 # Every entry point (what a person, launchd or sudo runs) names /bin/bash on its #! line: never a bash looked up on the
 # PATH (#!/usr/bin/env bash), which, with . or an entry in the site folder on the PATH, could be one WordPress put in
 # wp-content/. Every other file in bin/ and os/darwin/ with a #! line must be one of them, so a new one isn't missed.
-entry_points="bin/offprint bin/new bin/publish bin/backup bin/collect bin/check-site bin/wp bin/setup-wp bin/publish-agent os/darwin/install-agent os/darwin/host-setup.sh os/darwin/host-undo.sh os/darwin/secret"
+entry_points="bin/offprint bin/new bin/publish bin/backup bin/collect bin/pigeonhole bin/check-site bin/wp bin/setup-wp bin/publish-agent os/darwin/install-agent os/darwin/host-setup.sh os/darwin/host-undo.sh os/darwin/secret"
 wrong=""
 for f in $entry_points; do
   if [ ! -f "$f" ]; then wrong="$wrong $f (missing)"; elif [ "$(head -n 1 "$f")" != '#!/bin/bash' ]; then wrong="$wrong $f ($(head -n 1 "$f"))"; fi

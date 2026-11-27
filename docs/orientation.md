@@ -102,6 +102,7 @@ side wherever you can.
 | A new refusal | `bin/check-site` or `bin/publish` | A comment saying what it stops, a test that fails without it, and a message that says what to do |
 | Anything that changes the Mac | `os/darwin/` | The tool never runs `sudo`. It prints the line and the owner runs it |
 | A field in `site.json` | `lib/config.php` | It is the only parser; nothing is ever sourced or `eval`ed from it |
+| Something a server of the owner's needs | Printed, for the owner to run (`offprint pigeonhole print-server`) | The tool never touches a server and never runs `sudo`. What is printed is a file of the tool's own, tested by being run for real in `tests/rehearsal.sh` |
 
 ## How this codebase is tested, and why it looks the way it does
 
@@ -142,23 +143,34 @@ gets no shell; set-up makes the key; set-up does the server's side itself over t
 each command and asking first, with an undo; the server's host key is pinned in `site.json` and never learnt
 during a publish; Caddy is documented first.
 
-**Pigeonhole: comments on a static site.** Approved by the owner on 26 November 2026, and built in six stages. A
-visitor's browser encrypts a comment to keys only the owner holds and posts it to one path of the site's own origin;
-the web server forwards it to a store on a private network; the Mac fetches it, opens it, and hands it to WordPress,
-where it waits in the moderation queue; an approved comment shows at the next publish. Built so far: the Mac's side
-(stage 2), which is `site.json`'s `pigeonhole` block, `lib/pigeonhole.php` (the check and the sorter), `offprint
-collect` and `wp offprint import-submission`; and the page's side (stage 3), which is the form in export mode
-(`plugin/offprint/src/Pigeonhole.php`), the two scripts a page loads (sources in `pigeonhole/browser/`, built into
-`plugin/offprint/`), `bin/check-site-pigeonhole.php`, and `ADAPTER_PIGEONHOLE`, by which an adapter says its host
-forwards the path; and the store (stage 4), `pigeonhole/server/store.js`, which takes what the web server forwards
-and keeps it. Not built: setting the store up on a server, the fetch, the keys' set-up, and the admin bar's part.
-Until they are, a comment form would post to nothing, which is why no adapter of the tool's sets
-`ADAPTER_PIGEONHOLE`. The store has only ever run on this Mac, in its tests. Decided: fetched on a schedule but opened only when the owner asks; held
-always; no email about a comment; avatars off; moderating asks for no publish.
+**Pigeonhole: comments on a static site.** Approved by the owner on 26 November 2026, built in six stages, of which
+five are done; it is here, not above, because it has not yet run on a real server. A visitor's browser encrypts a
+comment to keys only the owner holds and posts it to one path of the site's own origin; the web server forwards it
+to a store on a private network; the Mac fetches it over ssh, opens it when the owner asks, and hands it to
+WordPress, where it waits in the moderation queue; an approved comment shows at the next publish. The parts:
+`site.json`'s `pigeonhole` block (`lib/config.php`); the page (`plugin/offprint/src/Pigeonhole.php`, the two scripts
+built from `pigeonhole/browser/`, `bin/check-site-pigeonhole.php`); the store and its pull command
+(`pigeonhole/server/store.js`, `pull.js`) and the script that sets them up on a server (`setup.sh`, printed by
+`offprint pigeonhole print-server`, never run by the tool); the fetch (`lib/pigeonhole.sh`); `offprint collect`
+(`bin/collect`, `lib/pigeonhole.php`) and `wp offprint import-submission`; the keys and the doctor (`bin/pigeonhole`,
+`lib/pigeonhole-keys.php`); the agent's part (`bin/publish-agent`: a fetch on every wake, a collection when WordPress
+asks); the admin bar's (`Comments_View.php`); and the publish's look at the live site after "Live"
+(`check_live_comments` in `bin/publish`, with `bin/check-live-page.php`). `ADAPTER_PIGEONHOLE` is how an adapter says its host forwards the path,
+and no adapter of the tool's sets it. Decided: fetched on a schedule but opened only when the owner asks; held
+always; no email about a comment; avatars off; moderating asks for no publish; the visitor's address goes to the
+store for a limit held in memory only. Left: one security review of the whole, then the first real run, on the
+owner's own site, done with the owner.
+
+`tests/rehearsal.sh` is the nearest thing to that real run, and the place to try any change to this: real Caddy,
+sshd, node, ssh, `age` and WordPress, in Docker. It found what the stand-ins could not (ssh runs the hop's command
+through the owner's own shell, and zsh reads an unquoted `[%h]:%p` as a file pattern), which is the usual lesson
+here: a stand-in is only as true as the last real run it was checked against. It also showed that a key's own
+line in `authorized_keys` can't forbid a listening socket (`ssh -R /path`), which the reviewer suspected and no
+reading could settle: hence the sshd rule the web server's commands now make.
 
 Also deferred until something needs it: a WordPress filter that lets a site add its own starting addresses.
 
-## Known gaps, as of 26 November 2026
+## Known gaps, as of 27 November 2026
 
 Check each is still true before relying on it or fixing it.
 
@@ -217,6 +229,19 @@ Check each is still true before relying on it or fixing it.
   until its own cache lets go.
 - Pigeonhole: `bin/check-site-pigeonhole.php` reads every page with the HTML parser a second time (the address
   check reads each first), which a site of many thousands of pages will feel.
+- Pigeonhole has run whole only in Docker (`tests/rehearsal.sh`). Never run for real: the store's systemd unit
+  (written and read by `systemd-analyze verify`, never started), the firewall lines the set-up prints, a proxy in
+  front of the web server (the per-address limit depends on the web server knowing the visitor's address behind it),
+  a fetch started by the agent while the login Keychain is locked, and the notification under launchd with the new
+  code (shown once by hand, in stage 1).
+- Pigeonhole: a fetch makes one ssh connection for each file it takes and another to remove it, through the jump.
+  Fine for a blog; a site that gets hundreds between fetches will want one connection for all.
+- Pigeonhole: a file on the store that is not what its name says is left there and counted at every fetch until the
+  store's 30 days are up; nothing removes it sooner but the owner.
+- Pigeonhole: there is no command to replace the daily key (a new one can be added beside the old by hand), and no
+  second site has been set up on one store's machine, though the server is laid out for it.
+- Pigeonhole: the publish's look at the live site after "Live" asks for one page; a host that serves different
+  bytes to different visitors, or changes another page, is not seen.
 - There is no release tag yet.
 
 ## Working with the owner

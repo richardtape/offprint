@@ -1,14 +1,25 @@
 #!/bin/bash
-# offprint collect: takes the comments waiting in this site's pigeonhole spool into WordPress, held for the owner.
+# offprint collect: fetches what this site's pigeonhole holds, and takes it into WordPress, held for the owner.
 # Run from inside the site folder (or with OFFPRINT_SITE set to it). It needs a "pigeonhole" block in site.json.
+#   offprint collect                         fetch, then open what is in the spool and hand it to WordPress
+#   offprint collect --no-fetch              only open what is in the spool already
+#   offprint collect --fetch-only [--notify] only fetch: nothing is opened, and the daily key is not read. This is what
+#                                            the site's agent runs on its wake (the owner's decision, 26 November
+#                                            2026: fetched on a schedule, opened only when the owner asks). --notify:
+#                                            when the fetch brought anything, one macOS notification says how many are
+#                                            waiting, and nothing else.
 #
-# A comment a visitor sends is encrypted in their browser, to the public keys in site.json. What reaches this Mac is
-# one file a comment, NAME.age, NAME being the sha256 of its bytes, in the spool. The spool and the two folders beside
-# it are this user's own, under OFFPRINT_HOME (~/Library/Application Support/Offprint unless set), never in the site
-# folder, whose var/ WordPress can read:
-#   OFFPRINT_HOME/pigeonhole/SITE_NAME/spool/      what is waiting. (Nothing fetches into it yet: that is not built.)
+# A comment a visitor sends is encrypted in their browser, to the public keys in site.json. The site's web server
+# passes it to the pigeonhole's store, a machine nothing else reaches. The fetch (lib/pigeonhole.sh, where its rules
+# are) brings each to this Mac over ssh as one file, NAME.age, NAME being the sha256 of its bytes, and only then
+# removes it from the store. It runs when site.json's pigeonhole block names its server; with a block that names
+# none, there is nothing to fetch from and only the spool is read. The spool and the two folders beside it are this
+# user's own, under OFFPRINT_HOME (~/Library/Application Support/Offprint unless set), never in the site folder, whose
+# var/ WordPress can read:
+#   OFFPRINT_HOME/pigeonhole/SITE_NAME/spool/      what is fetched and waiting to be opened
 #   OFFPRINT_HOME/pigeonhole/SITE_NAME/done/       what WordPress has taken; emptied of files over 30 days old
 #   OFFPRINT_HOME/pigeonhole/SITE_NAME/rejected/   what was refused, each beside a NAME.age.why saying why, in one line
+# A fetch that fails is said, and what is in the spool already is opened all the same.
 #
 # For each file in the spool, in order, and nothing is ever dropped:
 #   1. Its name is matched (64 hex digits and .age), it must be a plain file no larger than a submission can be, and
@@ -36,10 +47,17 @@
 # arguments, a log or var/. age's own messages are dropped. A reason kept in rejected/ is one of the tool's own fixed
 # texts, or WordPress's held to plain words: never anything a stranger sent.
 #
-# It holds the publish's lock (var/publish.lock), so it never runs beside a publish or a restore. It writes counts
-# and a time, and nothing else, to var/pigeonhole.json.
+# Opening holds the publish's lock (var/publish.lock), so it never runs beside a publish or a restore; a fetch alone
+# does not (it touches nothing a publish reads, and must not make the owner's own publish wait every few minutes).
+# Both hold the spool's own lock (lib/pigeonhole.sh), so no two runs fetch or open at once. It writes counts, a time
+# and one fixed word, and nothing else, to var/pigeonhole.json (a collection) and var/pigeonhole-fetch.json (a fetch).
 #
-# Prints "ok: ..." (exit 0) or "problem: ..." with what to do (exit 1). Exit 2: a usage mistake, or no site.
+# Prints "ok: ..." (exit 0) or "problem: ..." with what to do (exit 1). Exit 75: a publish, or another fetch or
+# collection, holds a lock; nothing was done (the agent tries again). Exit 2: a usage mistake, or no site.
+# --fetch-only for a site with no pigeonhole, or one that names no server, does nothing and says nothing (exit 0):
+# the agent runs it for every site.
+#   OFFPRINT_OSASCRIPT   the program that shows the notification, instead of /usr/bin/osascript (the tests' seam;
+#                        never one in the site folder)
 # Needs bash 3.2 (macOS) or newer.
 set -u
 # lib/site.sh first, found by the shell's own builtins: it makes the PATH safe to use before anything is looked up on
@@ -49,74 +67,101 @@ case "${BASH_SOURCE[0]}" in */*) here="${BASH_SOURCE[0]%/*}" ;; *) here=. ;; esa
 set +x
 set +a   # (after set +x, so the one line a trace shows is still "+ set +x"): nothing set below is exported
 . "$TOOL/lib/adapter.sh" || exit 2   # for offprint_secret_get; no adapter is loaded here
+. "$TOOL/lib/pigeonhole.sh" || exit 2
 
-[ $# -eq 0 ] || { echo "usage: offprint collect" >&2; exit 2; }
+usage() { echo "usage: offprint collect [--no-fetch | --fetch-only [--notify]]" >&2; exit 2; }
+fetch_only=0; no_fetch=0; notify=0
+for arg in "$@"; do
+  case "$arg" in
+    --fetch-only) fetch_only=1 ;;
+    --no-fetch) no_fetch=1 ;;
+    --notify) notify=1 ;;
+    *) usage ;;
+  esac
+done
+if [ "$no_fetch" = 1 ] && [ "$fetch_only" = 1 ]; then usage; fi
+if [ "$notify" = 1 ] && [ "$fetch_only" = 0 ]; then usage; fi
 offprint_find_site
 offprint_load_site
 cd "$SITE" || exit 2
 
 SECRET=pigeonhole-daily
-MAX_BYTES=16384          # no submission's file is larger: the largest today is under 9 KB
+MAX_BYTES="$PIGEONHOLE_MAX_BYTES"
+BUSY=75
 LOCK="$SITE/var/publish.lock"; HAVE_LOCK=0; TMP=""
 cleanup() {
   identity=""; unset identity
   checked=""; unset checked
+  pigeonhole_ssh_close
   [ -z "$TMP" ] || rm -rf "$TMP"
   [ "$HAVE_LOCK" != 1 ] || rm -rf "$LOCK"
+  pigeonhole_unlock
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-problem() { printf 'problem: %s\n' "$1"; exit 1; }
+problem() { printf 'problem: %s\n' "$1"; exit "${2:-1}"; }
 # plural N ONE MANY: "1 ONE" or "N MANY"
 plural() { if [ "$1" = 1 ]; then printf '1 %s' "$2"; else printf '%s %s' "$1" "$3"; fi; }
 
+# The agent runs --fetch-only for every site it has: one that takes no comments, or names no server to fetch from, is
+# nothing to do and nothing to say.
+if [ "$fetch_only" = 1 ] && { [ -z "$SITE_PIGEONHOLE_PATH" ] || [ -z "$SITE_PIGEONHOLE_SERVER" ]; }; then exit 0; fi
 [ -n "$SITE_PIGEONHOLE_PATH" ] \
   || problem 'site.json has no "pigeonhole" block, so this site takes no comments and there is nothing to collect.'
 
 # The three folders: this user's own, outside the site folder (WordPress must see neither what is waiting nor why
 # something was refused), each a real folder and not a link.
-home="${OFFPRINT_HOME:-}"
-if [ -z "$home" ]; then
-  case "${HOME:-}" in
-    /*) home="$HOME/Library/Application Support/Offprint" ;;
-    *) problem "HOME isn't set to a folder, so there is nowhere to keep the pigeonhole's spool; set HOME, or OFFPRINT_HOME." ;;
-  esac
-fi
-case "$home" in /*) ;; *) problem "OFFPRINT_HOME must be a whole path, starting with a slash." ;; esac
-BOX="$home/pigeonhole/$SITE_NAME"
-if offprint_inside_site "$BOX"; then
-  problem "the pigeonhole's folder, $(_offprint_shown "$BOX"), is inside the site folder, which WordPress can read and write; set OFFPRINT_HOME to a folder outside it."
-fi
-for d in "$home" "$home/pigeonhole" "$BOX" "$BOX/spool" "$BOX/done" "$BOX/rejected"; do
-  if [ -L "$d" ] || { [ -e "$d" ] && [ ! -d "$d" ]; }; then
-    problem "$(_offprint_shown "$d") is not a folder (a link, or a file); move it away, then collect again."
-  fi
-  if [ ! -d "$d" ]; then
-    # (the Offprint folder itself may need the folders above it, in a new HOME; the rest are made one by one)
-    case "$d" in "$home") mkdir -p "$d" 2> /dev/null ;; *) mkdir "$d" 2> /dev/null ;; esac || problem "couldn't make the folder $(_offprint_shown "$d")."
-    case "$d" in "$home") ;; *) chmod 700 "$d" 2> /dev/null ;; esac
-  fi
-done
-for d in "$BOX" "$BOX/spool" "$BOX/done" "$BOX/rejected"; do
-  if [ -z "$(find "$d" -maxdepth 0 -type d -user "$(id -u)" ! -perm -040 ! -perm -020 ! -perm -010 \
-      ! -perm -004 ! -perm -002 ! -perm -001 -print 2> /dev/null)" ]; then
-    problem "$(_offprint_shown "$d") must be a folder of yours that nobody else can read (chmod 700), and it isn't."
-  fi
-done
-# made after the check above, so a link put in a folder's place in between is still refused
-if offprint_inside_site "$BOX/spool" || offprint_inside_site "$BOX/done" || offprint_inside_site "$BOX/rejected"; then
-  problem "the pigeonhole's folder, $(_offprint_shown "$BOX"), leads into the site folder, which WordPress can read and write; set OFFPRINT_HOME to a folder outside it."
-fi
-SPOOL="$BOX/spool"; DONE="$BOX/done"; REJECTED="$BOX/rejected"
+pigeonhole_box || problem "$PIGEONHOLE_PROBLEM"
 
-# The lock a publish takes (mkdir is atomic), with the same two notes in it. One that is there already is never
-# taken over here: a publish is running, or left it.
-mkdir -p "$SITE/var" 2> /dev/null
-mkdir "$LOCK" 2> /dev/null \
-  || problem "a publish is running, or left its lock (var/publish.lock); wait for it, then collect again."
-HAVE_LOCK=1
-echo "$$" > "$LOCK/pid"; ps -o command= -p "$$" > "$LOCK/command" 2> /dev/null
+# The lock a publish takes (mkdir is atomic), with the same two notes in it, for anything that opens: one that is
+# there already is never taken over here (a publish is running, or left it). Then the spool's own, for every run.
+if [ "$fetch_only" = 0 ]; then
+  mkdir -p "$SITE/var" 2> /dev/null
+  mkdir "$LOCK" 2> /dev/null \
+    || problem "a publish is running, or left its lock (var/publish.lock); wait for it, then collect again." "$BUSY"
+  HAVE_LOCK=1
+  echo "$$" > "$LOCK/pid"; ps -o command= -p "$$" > "$LOCK/command" 2> /dev/null
+fi
+pigeonhole_lock || problem "$PIGEONHOLE_PROBLEM" "$BUSY"
+
+# ---- the fetch ---------------------------------------------------------------------------------------------------
+# notify_waiting N: one notification, a count and the site's name and nothing else (the owner's decision, 26 November
+# 2026: never a word of a comment). Shown by the system's own osascript, when there is one; N is digits and the name
+# is site.json's, matched by lib/config.php, so neither can be more than it looks in the one line handed to it.
+notify_waiting() {
+  local osa="${OFFPRINT_OSASCRIPT:-/usr/bin/osascript}" words
+  [[ "$1" =~ ^[0-9]{1,6}$ ]] && [[ "$SITE_NAME" =~ ^[a-z][a-z0-9-]{0,30}$ ]] || return 0
+  [ -f "$osa" ] && [ -x "$osa" ] && ! offprint_inside_site "$osa" || return 0
+  words="$(plural "$1" "comment is" "comments are") waiting to be checked"
+  "$osa" -e "display notification \"$words\" with title \"Offprint: $SITE_NAME\"" > /dev/null 2>&1 < /dev/null || true
+}
+fetch_said=""; fetch_problem=""
+if [ -n "$SITE_PIGEONHOLE_SERVER" ] && [ "$no_fetch" = 0 ]; then
+  if ! offprint_private_dir offprint-collect TMP; then
+    PIGEONHOLE_REASON=setup
+    fetch_problem="couldn't make a private folder for this run${OFFPRINT_PRIVATE_PROBLEM:+: $OFFPRINT_PRIVATE_PROBLEM}."
+  elif pigeonhole_ssh_open "$TMP" && pigeonhole_fetch; then
+    :
+  else
+    fetch_problem="$PIGEONHOLE_PROBLEM"
+  fi
+  pigeonhole_ssh_close
+  [ "$FETCHED" = 0 ] || fetch_said="Fetched $(plural "$FETCHED" "submission" "submissions") from the pigeonhole."
+  [ "$FETCH_DAMAGED" = 0 ] || fetch_problem="${fetch_problem:+$fetch_problem }$(plural "$FETCH_DAMAGED" "file on the pigeonhole's server is not what its name says and was left there" "files on the pigeonhole's server are not what their names say and were left there")."
+  if [ -z "$fetch_problem" ] && [ "$FETCH_LEFT" != 0 ]; then
+    fetch_problem="$(plural "$FETCH_LEFT" "submission couldn't be fetched or removed this time" "submissions couldn't be fetched or removed this time"); the next fetch tries again."
+  fi
+  if [ -z "$fetch_problem" ]; then pigeonhole_fetch_status true; else pigeonhole_fetch_status false; fi
+  [ -z "$fetch_problem" ] || fetch_problem="The fetch: $fetch_problem"
+fi
+if [ "$fetch_only" = 1 ]; then
+  waiting="$(pigeonhole_waiting)"
+  [ "$notify" = 0 ] || [ "$FETCHED" = 0 ] || notify_waiting "$waiting"
+  [ -z "$fetch_problem" ] || problem "${fetch_said:+$fetch_said }$fetch_problem"
+  echo "ok: ${fetch_said:-Nothing new on the pigeonhole.} $(plural "$waiting" "is" "are") waiting to be opened (offprint collect)."
+  exit 0
+fi
 
 imported=0; spam=0; already=0; canaries=0; rejected=0; damaged=0; failed=0; waiting=0; stopped=""; unanswered=0
 # status: the counts of this run and its time, for the admin bar. Numbers only: nothing a stranger sent.
@@ -136,13 +181,14 @@ any=0
 for f in "$SPOOL"/*; do [ ! -e "$f" ] && [ ! -L "$f" ] || { any=1; break; }; done
 if [ "$any" = 0 ]; then
   status
+  [ -z "$fetch_problem" ] || problem "$fetch_problem Nothing is waiting in the pigeonhole's spool."
   echo "ok: nothing is waiting in the pigeonhole's spool."
   exit 0
 fi
 
 # Something is waiting, so the rest is needed: age, the daily key, and WordPress.
 command -v age > /dev/null 2>&1 || problem "age isn't installed; install it (brew install age) and collect again."
-offprint_private_dir offprint-collect TMP \
+[ -n "$TMP" ] || offprint_private_dir offprint-collect TMP \
   || problem "couldn't make a private folder for this run${OFFPRINT_PRIVATE_PROBLEM:+: $OFFPRINT_PRIVATE_PROBLEM}."
 running="$(dc ps --status running --services 2> /dev/null < /dev/null)" || running=""
 case "
@@ -247,6 +293,7 @@ status
 # What happened, in the owner's words. A problem when anything is left that should not be.
 said=""
 say() { said="$said${said:+ }$1"; }
+[ -z "$fetch_said" ] || say "$fetch_said"
 [ "$imported" = 0 ] || say "$(plural "$imported" "comment is" "comments are") waiting for you in WordPress's moderation queue."
 [ "$spam" = 0 ] || say "$(plural "$spam" "went" "went") to WordPress's spam list."
 [ "$already" = 0 ] || say "$(plural "$already" "was a comment already" "were comments already")."
@@ -256,7 +303,8 @@ say() { said="$said${said:+ }$1"; }
 if [ -n "$stopped" ]; then
   say "It stopped there: $stopped. $(plural "$waiting" "submission is" "submissions are") still in the spool, and nothing is lost: collect again."
 fi
-if [ -n "$stopped" ] || [ "$failed" != 0 ] || [ "$damaged" != 0 ]; then
+[ -z "$fetch_problem" ] || say "$fetch_problem"
+if [ -n "$stopped" ] || [ "$failed" != 0 ] || [ "$damaged" != 0 ] || [ -n "$fetch_problem" ]; then
   [ -n "$stopped" ] || [ "$failed" = 0 ] || say "$(plural "$failed" "submission couldn't be taken this time and is" "submissions couldn't be taken this time and are") still in the spool; nothing is lost: collect again. One that is left every time can be moved out of $(_offprint_shown "$SPOOL") by hand."
   printf 'problem: %s\n' "$said"
   exit 1

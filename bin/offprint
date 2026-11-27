@@ -29,9 +29,17 @@ usage: offprint COMMAND [ARGS...]
   offprint backup restore [--from FILE] [--unchecked] [--yes]
                                              replace the local database with the committed backup's (or a dump
                                              file's), keeping an encrypted copy of the one it replaces
-  offprint collect                           take the comments waiting in the site's pigeonhole spool into WordPress,
-                                             held for moderation (needs a pigeonhole block in site.json; nothing
-                                             fetches comments into the spool yet)
+  offprint collect [--no-fetch | --fetch-only [--notify]]
+                                             fetch what the site's pigeonhole holds, and take it into WordPress,
+                                             held for moderation (--fetch-only: fetch, and open nothing; needs a
+                                             pigeonhole block in site.json)
+  offprint pigeonhole keys                   make the site's two comment keys in the login Keychain (the daily key
+                                             and the pull key), and print their public halves
+  offprint pigeonhole print-server web | store WEB_ADDRESS
+                                             print what you do on the web server, or the script you run on the
+                                             store's machine (Offprint runs neither)
+  offprint pigeonhole doctor                 check the whole path a comment travels, with a test submission: one ok
+                                             or problem line each (exit 0 only when all are ok)
   offprint adapter setup [--yes]             set up on this Mac what the site's host adapter needs (each step says
                                              what it will do, and asks first; --yes: yes to each)
   offprint adapter doctor                    check what the site's host adapter needs, and the live site: one ok or
@@ -71,6 +79,7 @@ case "$cmd" in
   publish) exec /bin/bash "$BIN/publish" "$@" ;;
   backup) exec /bin/bash "$BIN/backup" "$@" ;;
   collect) exec /bin/bash "$BIN/collect" "$@" ;;
+  pigeonhole) exec /bin/bash "$BIN/pigeonhole" "$@" ;;
   agent) exec /bin/bash "$BIN/publish-agent" "$@" ;;
   wp) exec /bin/bash "$BIN/wp" "$@" ;;
   setup-wp) exec /bin/bash "$BIN/setup-wp" "$@" ;;

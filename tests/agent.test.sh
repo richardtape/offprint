@@ -58,8 +58,38 @@ sleep "$(cat "$STUB_DIR/sleep" 2>/dev/null || echo 2)"
 echo "error output from the run" >&2
 echo run >> "$STUB_DIR/runs"
 STUB
-  chmod +x "$S/publish"
+  # The stand-in bin/collect: notes each call's arguments (collect.calls), and whether a publish had started by then.
+  #   --fetch-only --notify (what every start runs first): does nothing and says nothing, as for a site with no
+  #     pigeonhole. fetch_fails: fails as a fetch does, the file's one word being why (it writes
+  #     var/pigeonhole-fetch.json as bin/collect does). fetch_code N: exits N instead.
+  #   no arguments (a collection): says what collect_says holds (or that two comments wait), and exits collect_code
+  #     (0). collect_busy_for N: the first N say a lock is held and exit 75.
+  cat > "$S/collect" <<'STUB'
+#!/usr/bin/env bash
+echo "$*" >> "$STUB_DIR/collect.calls"
+if [ "$*" = "--fetch-only --notify" ]; then
+  if [ -f "$STUB_DIR/starts" ]; then echo after >> "$STUB_DIR/fetch.when"; else echo before >> "$STUB_DIR/fetch.when"; fi
+  if [ -f "$STUB_DIR/fetch_fails" ]; then
+    printf '{"fetched_at":1,"ok":false,"fetched":0,"damaged":0,"left":0,"waiting":0,"reason":"%s"}\n' "$(cat "$STUB_DIR/fetch_fails")" > "$PWD/var/pigeonhole-fetch.json"
+    echo "problem: The fetch: the pigeonhole's server couldn't be reached ($(cat "$STUB_DIR/fetch_fails"))."
+    echo "a second line that is not logged"
+    exit 1
+  fi
+  exit "$(cat "$STUB_DIR/fetch_code" 2>/dev/null || echo 0)"
+fi
+[ $# -eq 0 ] || { echo "unexpected: $*"; exit 99; }
+echo "$PWD|${OFFPRINT_SITE-unset}" >> "$STUB_DIR/collect.where"
+n="$(grep -c '^$' "$STUB_DIR/collect.calls")"
+if [ -f "$STUB_DIR/collect_busy_for" ] && [ "$n" -le "$(cat "$STUB_DIR/collect_busy_for")" ]; then
+  echo "problem: a publish is running, or left its lock (var/publish.lock); wait for it, then collect again."
+  exit 75
+fi
+if [ -f "$STUB_DIR/collect_says" ]; then cat "$STUB_DIR/collect_says"; else echo "ok: 2 comments are waiting for you in WordPress's moderation queue."; fi
+exit "$(cat "$STUB_DIR/collect_code" 2>/dev/null || echo 0)"
+STUB
+  chmod +x "$S/publish" "$S/collect"
 }
+ask_collect() { echo "2026-11-20T10:00:00Z ${1:-button}" > "$in/collect-request"; }
 ask() { echo "2026-11-20T10:00:00Z ${1:-button}" > "$in/publish-request"; }
 waiting() { if [ -e "$in/publish-request" ] || [ -L "$in/publish-request" ]; then echo yes; else echo no; fi; }
 marker() { if [ -e "$c/var/publish-waiting" ]; then echo yes; else echo no; fi; }
@@ -68,7 +98,7 @@ aged() { perl -e 'my $t = time - 60 * shift; utime $t, $t, @ARGV' "$2" "$1"; }
 # agent [ENV=VALUE...]: runs the tool's agent for the site $c (OFFPRINT_SITE), from the case folder, in the
 # foreground; sets code. Fast settings unless the case overrides them.
 agent() {
-  (cd "$tmp/case$n" && env STUB_DIR="$S" OFFPRINT_SITE="$c" PUBLISH_AGENT_PUBLISH="$S/publish" PUBLISH_AGENT_MIN_SECONDS=0 \
+  (cd "$tmp/case$n" && env STUB_DIR="$S" OFFPRINT_SITE="$c" PUBLISH_AGENT_PUBLISH="$S/publish" PUBLISH_AGENT_COLLECT="$S/collect" PUBLISH_AGENT_MIN_SECONDS=0 \
     PUBLISH_AGENT_BACKOFF_SECONDS=0.2 PUBLISH_AGENT_SETTLE_SECONDS=0 "$@" /bin/bash "$SRC/bin/publish-agent" > "$S/agent.out" 2>&1); code=$?
 }
 agent_lines() { grep -c ' agent: ' "$c/var/publish.log" 2>/dev/null || true; }
@@ -242,7 +272,8 @@ check "$t: exits 2" 2 "$code"
 check "$t: says so" "Not in an Offprint site folder (no site.json here or above); cd into one, or set OFFPRINT_SITE." "$out"
 check "$t: runs nothing" 0 "$(count "$S/starts")"
 check "$t: makes nothing" "" "$(find "$tmp/case$n/nosite" -mindepth 1)"
-# It needs only the site folder, not site.json's values: it never runs php (a stand-in php here would note it).
+# It needs only the site folder, not site.json's values: it never runs php itself (a stand-in php here would note it).
+# (What it runs, bin/publish and bin/collect, each reads site.json: both are stand-ins here.)
 newcase; ask; echo 0 > "$S/sleep"; mkdir -p "$S/bin"; printf '#!/bin/sh\ntouch "%s/php-ran"\nexit 1\n' "$S" > "$S/bin/php"; chmod +x "$S/bin/php"
 agent PATH="$S/bin:$PATH"; t="with a php that only notes it was run"
 check "$t: one run" 1 "$(count "$S/runs")"; check "$t: php never ran" no "$([ -e "$S/php-ran" ] && echo yes || echo no)"
@@ -466,5 +497,99 @@ for kind in dot empty relative absolute link; do
     check "$t: the plist, for this site" "0|1|1" "$code|$(printf '%s\n' "$out" | grep -c "<key>Label</key><string>$LABEL</string>")|$(printf '%s\n' "$out" | grep -c "<key>OFFPRINT_SITE</key><string>$(xml_of "$rphys")</string>")"
   done
 done
+
+# === comments: a fetch on every start, and a collection when WordPress asks ===
+calls() { if [ -f "$S/collect.calls" ]; then tr '\n' '|' < "$S/collect.calls"; fi; }
+collect_lines() { grep -c ' agent: comments: ' "$c/var/publish.log" 2>/dev/null || true; }
+newcase; agent; t="a start with no request"
+check "$t: it fetches, once, opening nothing" "--fetch-only --notify|" "$(calls)"
+check "$t: no publish, no collection" "0" "$(count "$S/starts")"
+check "$t: a fetch that works is not logged" 0 "$(agent_lines | grep . || echo 0)"
+check "$t: var/ is left exactly as it was" "$in" "$(find "$c/var" -mindepth 1)"
+newcase; ask "post 12"; echo 0 > "$S/sleep"; agent; t="a start with a publish request"
+check "$t: one fetch, and it came before the publish" "--fetch-only --notify| before" "$(calls) $(cat "$S/fetch.when")"
+check "$t: the publish ran" 1 "$(count "$S/runs")"
+newcase; ask; ask; echo 0 > "$S/sleep"; touch "$S/storm"; agent; t="a start that runs ten publishes"
+check "$t: still one fetch" 1 "$(grep -c -- '--fetch-only' "$S/collect.calls")"
+
+newcase; ask "post 12"; echo 0 > "$S/sleep"; echo unreachable > "$S/fetch_fails"; agent; t="the fetch fails"
+check "$t: logged, in one line: collect's own first line" 1 "$(grep -c " agent: fetching comments: problem: The fetch: the pigeonhole's server couldn't be reached (unreachable).\$" "$c/var/publish.log")"
+check "$t: its second line is not logged" 0 "$(grep -c 'a second line' "$c/var/publish.log")"
+check "$t: the publish runs all the same" 1 "$(count "$S/runs")"
+check "$t: exits 0" 0 "$code"
+# (a start within four minutes of a fetch doesn't fetch: the later starts here are five minutes on)
+later() { aged "$c/var/pigeonhole-fetch.json" 5; }
+later; agent; later; agent; t="the fetch fails again, the same way, on later starts"
+check "$t: it was tried each time" 3 "$(grep -c -- '--fetch-only' "$S/collect.calls")"
+check "$t: and not logged again (a Mac that is offline wakes this every five minutes)" 1 "$(grep -c ' agent: fetching comments: ' "$c/var/publish.log")"
+echo locked > "$S/fetch_fails"; later; agent; t="then fails another way"
+check "$t: that is logged" 2 "$(grep -c ' agent: fetching comments: ' "$c/var/publish.log")"
+rm "$S/fetch_fails"; printf '{"fetched_at":2,"ok":true,"fetched":0,"damaged":0,"left":0,"waiting":0,"reason":""}\n' > "$c/var/pigeonhole-fetch.json"; later; agent
+echo locked > "$S/fetch_fails"; later; agent; t="then works, then fails as before"
+check "$t: logged again: it had mended" 3 "$(grep -c ' agent: fetching comments: ' "$c/var/publish.log")"
+# WordPress can start the agent as often as it writes to the inbox: that must not be a fetch each time.
+newcase; printf '{"fetched_at":2,"ok":true,"fetched":0,"damaged":0,"left":0,"waiting":0,"reason":""}\n' > "$c/var/pigeonhole-fetch.json"
+ask_collect; agent; t="a start within four minutes of the last fetch"
+check "$t: no fetch; the collection that was asked for still runs" "|" "$(calls)"
+aged "$c/var/pigeonhole-fetch.json" 5; agent; t="a start five minutes after it"
+check "$t: it fetches" "|--fetch-only --notify|" "$(calls)"
+newcase; ln -s "$S/elsewhere" "$c/var/pigeonhole-fetch.json"; : > "$S/elsewhere"; agent; t="a fetch status that is a new link"
+check "$t: not taken for a fetch just made: it fetches" "--fetch-only --notify|" "$(calls)"
+for rc in 75 2 127; do
+  newcase; echo "$rc" > "$S/fetch_code"; agent
+  check "a fetch that ends $rc (another run has the spool; site.json; no collect): not logged, and the agent goes on" "0 0" "$(agent_lines | grep . || echo 0) $code"
+done
+newcase; echo unreachable > "$S/fetch_fails"; ln -s "$S/elsewhere" "$c/var/pigeonhole-fetch.json"; : > "$S/elsewhere"; agent; t="the fetch's status file is a link"
+check "$t: it is not read: the failure is logged" 1 "$(grep -c ' agent: fetching comments: ' "$c/var/publish.log")"
+
+newcase; ask_collect; agent; t="WordPress asks for a collection"
+check "$t: the fetch, then one collection" "--fetch-only --notify||" "$(calls)"
+check "$t: in the site folder, for the site" "$(phys "$c")|$(phys "$c")" "$(cat "$S/collect.where")"
+check "$t: the request is taken" "" "$(find "$in" -mindepth 1)"
+check "$t: exits 0" 0 "$code"
+check "$t: logged when it started, with when and why it was asked" 1 "$(grep -c ' agent: checking for comments (asked at 2026-11-20T10:00:00Z: button)$' "$c/var/publish.log")"
+check "$t: and what collect said: counts, in its own words" 1 "$(grep -c " agent: comments: ok: 2 comments are waiting for you in WordPress's moderation queue.\$" "$c/var/publish.log")"
+check "$t: no publish ran" 0 "$(count "$S/starts")"
+check "$t: nothing left over in var/" "" "$(leftovers)"
+newcase; ask_collect; ask "post 3"; echo 0 > "$S/sleep"; agent; t="a publish and a collection both asked for"
+check "$t: both run, once each" "1 1" "$(count "$S/runs") $(grep -c '^$' "$S/collect.calls")"
+check "$t: nothing left over in var/" "" "$(leftovers)"
+newcase; ask_collect; echo "problem: 1 submission couldn't be taken this time and is still in the spool; nothing is lost: collect again." > "$S/collect_says"; echo 1 > "$S/collect_code"; agent; t="the collection ends with a problem"
+check "$t: logged, and the request is done with" "1 " "$(grep -c " agent: comments: problem: 1 submission couldn't be taken" "$c/var/publish.log") $(leftovers)"
+check "$t: one try" 1 "$(grep -c '^$' "$S/collect.calls")"
+newcase; ask_collect; : > "$S/collect_says"; echo 3 > "$S/collect_code"; agent; t="collect says nothing"
+check "$t: that is logged, with its status" 1 "$(grep -c ' agent: comments: offprint collect said nothing (it ended with status 3)$' "$c/var/publish.log")"
+newcase; ask_collect; printf 'ok: \033[31mred\001 %s\nsecond line\n' "$(printf 'x%.0s' $(seq 1 400))" > "$S/collect_says"; agent; t="collect's line has control characters and is long"
+line="$(grep ' agent: comments: ' "$c/var/publish.log")"
+check "$t: no control character reaches the log, and no second line" "0 0" "$(printf '%s' "$line" | LC_ALL=C grep -c '[[:cntrl:]]') $(grep -c 'second line' "$c/var/publish.log")"
+check "$t: it is cut to 300 characters" 300 "$(printf '%s' "${line#* agent: comments: }" | wc -c | tr -d ' ')"
+
+newcase; ask_collect; echo 2 > "$S/collect_busy_for"; agent PUBLISH_AGENT_BACKOFF_SECONDS=0.05; t="a publish holds the lock for two tries"
+check "$t: tried three times, and done" "3 " "$(grep -c '^$' "$S/collect.calls") $(leftovers)"
+check "$t: logged once that it is waiting" 1 "$(grep -c ' agent: a publish or a fetch is running; trying again every 0.05 seconds' "$c/var/publish.log")"
+check "$t: started once in the log, answered once" "1 1" "$(grep -c ' agent: checking for comments' "$c/var/publish.log") $(collect_lines)"
+newcase; ask_collect; echo 999 > "$S/collect_busy_for"; agent PUBLISH_AGENT_BACKOFF_SECONDS=0.05 PUBLISH_AGENT_BUSY_MAX_SECONDS=1; t="the lock is held too long"
+check "$t: it gives up, and the request waits in var/ for the next start" "1 yes" "$(grep -c ' agent: giving up for now: a lock has been held' "$c/var/publish.log") $([ -f "$c/var/collect-waiting" ] && echo yes || echo no)"
+rm "$S/collect_busy_for"; agent
+check "$t, then the next start: it runs, and is done" "1 " "$(collect_lines) $(leftovers)"
+
+newcase; mkdir -p "$S/target"; echo keep > "$S/target/file"; ln -s "$S/target" "$in/collect-request"; agent; t="a collect request that is a symlink to a folder"
+check "$t: no collection" 0 "$(grep -c '^$' "$S/collect.calls")"
+check "$t: removed, and logged" "1" "$(grep -c ' agent: var/inbox/collect-request was a symlink, so it was removed and nothing ran$' "$c/var/publish.log")"
+check "$t: what it pointed at is untouched" keep "$(cat "$S/target/file")"
+check "$t: nothing left over" "" "$(find "$in" -mindepth 1)$(leftovers)"
+newcase; mkdir "$in/collect-request"; echo x > "$in/collect-request/file"; agent; t="a collect request that is a folder"
+check "$t: no collection; removed, and logged" "0 1" "$(grep -c '^$' "$S/collect.calls") $(grep -c ' agent: var/inbox/collect-request was not a plain file, so it was removed and nothing ran$' "$c/var/publish.log")"
+newcase; head -c 2000 /dev/zero | tr '\0' 'a' > "$in/collect-request"; agent; t="a collect request larger than 1 KB"
+check "$t: no collection; removed, and logged" "0 1" "$(grep -c '^$' "$S/collect.calls") $(grep -c ' agent: var/inbox/collect-request was larger than 1 KB, so it was removed and nothing ran$' "$c/var/publish.log")"
+newcase; printf '2026-11-20T10:00:00Z $(touch %s/pwned) `id` ; rm -rf /\n' "$S" > "$in/collect-request"; agent; t="a collect request with a shell's words in it"
+check "$t: nothing of it runs; only its letters reach the log" "no 1" "$([ -e "$S/pwned" ] && echo yes || echo no) $(grep -c ' agent: checking for comments (asked at 2026-11-20T10:00:00Z: touch' "$c/var/publish.log")"
+check "$t: collect is given no word of it" "--fetch-only --notify||" "$(calls)"
+newcase; echo x > "$in/.collect-request.abc123"; aged "$in/.collect-request.abc123" 11; echo y > "$in/.collect-request.new"; agent; t="WordPress's temporary files for a collect request"
+check "$t: one left for over ten minutes is removed, a new one kept" ".collect-request.new" "$(ls -A "$in")"
+newcase; i=0; ( while [ "$i" -lt 40 ]; do ask_collect; i=$((i + 1)); sleep 0.05; done ) & writer=$!
+agent PUBLISH_AGENT_MIN_SECONDS=1; wait "$writer"; t="a stream of collect requests"
+runs_now="$(grep -c '^$' "$S/collect.calls")"
+if [ "$runs_now" -ge 1 ] && [ "$runs_now" -le 10 ]; then ok "$t: at most ten collections in one start ($runs_now)"; else bad "$t: $runs_now collections"; fi
 
 exit "$fail"

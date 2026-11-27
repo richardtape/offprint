@@ -1,0 +1,505 @@
+#!/bin/bash
+# offprint pigeonhole: what a site that takes comments needs set up, and a check of the whole path a comment travels.
+# Run from inside the site folder (or with OFFPRINT_SITE set to it).
+#
+#   offprint pigeonhole keys
+#       Makes this site's two keys in the login Keychain, each only when it isn't there (one that is there is never
+#       replaced: what was sent to the old key could no longer be opened), and prints the public half of each:
+#         - the daily key (the secret pigeonhole-daily), which opens comments: age-keygen makes it, and it goes down a
+#           pipe into the Keychain. Its public half is what site.json's pigeonhole.recipients starts with.
+#         - the pull key (pigeonhole-pull), an ssh key for this site only, which fetches: made here
+#           (lib/pigeonhole-keys.php), kept as one line. Its public half goes to the two servers (print-server).
+#       Neither private key is ever shown, or in a file, an argument or a variable. A second recipient, the recovery
+#       key, is the owner's to make somewhere else and keep off this Mac; only its public half is ever given to Offprint.
+#
+#   offprint pigeonhole print-server web
+#   offprint pigeonhole print-server store WEB_ADDRESS
+#       Prints what the owner does on each server, for this site's settings and pull key. Offprint runs none of it,
+#       never runs sudo, and never touches a server. "web": the lines for the web server's Caddy site (one path,
+#       POST only, forwarded to the store) and the commands that make the user the Mac's ssh passes through. "store":
+#       a whole script, to read and then run as root on the store's machine (pigeonhole/server/setup.sh, with the
+#       store itself in it); WEB_ADDRESS is the web server's address on the private network, the one machine the
+#       store may speak with.
+#
+#   offprint pigeonhole doctor
+#       One "ok: ..." or "problem: ..." line for each step, each problem with what to do; it goes on after a problem
+#       where it can. The settings, the adapter's word, the programs, both keys, the two ssh hops against the pinned
+#       host keys, that the public path refuses GET; then a test submission (a canary) posted through the public site
+#       as a visitor's browser posts, fetched back, and opened with the daily key. Exit 0 only when every line is ok.
+#       It changes nothing but the spool (what it fetches waits there like any other; the canary goes to done/).
+#
+# The keys are tokens (CLAUDE.md). Tracing and allexport are turned off first thing; the daily key, where doctor
+# needs it, is in one shell variable for the pipe to age, as in bin/collect; the pull key is never in a variable here
+# (the Keychain's own helper, os/darwin/secret, holds it as it holds any secret, and hands it on down a pipe).
+# The public halves, the host keys and the addresses are public, and are printed.
+#   PIGEONHOLE_CHECK_ORIGIN   the origin doctor asks instead of site.json's public_url (the tests' and the
+#                             rehearsal's seam: http://127.0.0.1:PORT)
+# Exit 0: done, or every check ok. 1: a problem. 75: another fetch or collection holds the spool's lock. 2: a usage
+# mistake, or no site. Needs bash 3.2 (macOS) or newer.
+set -u
+# lib/site.sh first, found by the shell's own builtins: it makes the PATH safe to use before anything is looked up on it.
+case "${BASH_SOURCE[0]}" in */*) here="${BASH_SOURCE[0]%/*}" ;; *) here=. ;; esac
+. "$here/../lib/site.sh" || exit 2
+set +x
+set +a   # (after set +x, so the one line a trace shows is still "+ set +x"): nothing set below is exported
+. "$TOOL/lib/adapter.sh" || exit 2
+. "$TOOL/lib/pigeonhole.sh" || exit 2
+
+usage() {
+  echo "usage: offprint pigeonhole keys | doctor | print-server web | print-server store WEB_ADDRESS" >&2
+  exit 2
+}
+sub="${1:-}"
+case "$sub" in
+  keys|doctor) [ $# -eq 1 ] || usage ;;
+  print-server)
+    case "${2:-}" in
+      web) [ $# -eq 2 ] || usage ;;
+      store) [ $# -eq 3 ] || usage ;;
+      *) usage ;;
+    esac ;;
+  *) usage ;;
+esac
+
+# Everything up to here ran no program; from here, none is handed this command's standard input.
+exec < /dev/null
+offprint_find_site
+offprint_load_site
+cd "$SITE" || exit 2
+
+DAILY=pigeonhole-daily
+PULL="$PIGEONHOLE_PULL_SECRET"
+KEYS="$TOOL/lib/pigeonhole-keys.php"
+BITS=18   # the proof of work a page's script finds (plugin/offprint/src/Pigeonhole.php holds the same number)
+TMP=""; LOADED=0
+cleanup() {
+  identity=""; unset identity
+  pigeonhole_ssh_close
+  [ -z "$TMP" ] || rm -rf "$TMP"
+  pigeonhole_unlock
+  [ "$LOADED" != 1 ] || { offprint_adapter_stop; offprint_adapter_cleanup; }
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+problem() { printf 'problem: %s\n' "$1"; exit "${2:-1}"; }
+need() { command -v "$1" > /dev/null 2>&1 || problem "$1 isn't on the PATH${2:+; $2}."; }
+age_re='^age1[ac-hj-np-z02-9]{58}$'
+ssh_re='^ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43}$'
+
+# pull_public: the public half of the pull key in the Keychain, on standard output. Returns the Keychain's own status
+# when the key isn't there (1) or can't be read (3, 4), and 5 when what is there is not a pull key.
+pull_public() {
+  local out
+  out="$(offprint_secret_get "$PULL" 2> /dev/null | php "$KEYS" public 2> /dev/null; echo ":${PIPESTATUS[0]}:${PIPESTATUS[1]}")"
+  case "$out" in
+    *":0:0") out="${out%:0:0}"; out="${out%$'\n'}"; [[ "$out" =~ $ssh_re ]] || return 5; printf '%s' "$out" ;;
+    *":0:"*) return 5 ;;
+    *":1:"*) return 1 ;;
+    *":3:"*) return 3 ;;
+    *) return 4 ;;
+  esac
+}
+# daily_public: the public half of the daily key in the Keychain (age-keygen -y, the key on a pipe). Returns as
+# pull_public does.
+daily_public() {
+  local out
+  out="$(offprint_secret_get "$DAILY" 2> /dev/null | age-keygen -y 2> /dev/null; echo ":${PIPESTATUS[0]}:${PIPESTATUS[1]}")"
+  case "$out" in
+    *":0:0") out="${out%:0:0}"; out="${out%$'\n'}"; [[ "$out" =~ $age_re ]] || return 5; printf '%s' "$out" ;;
+    *":0:"*) return 5 ;;
+    *":1:"*) return 1 ;;
+    *":3:"*) return 3 ;;
+    *) return 4 ;;
+  esac
+}
+# bracketed ADDRESS: an IPv6 address in square brackets, as it is written before a port; an IPv4 one as it is
+bracketed() { case "$1" in *:*) printf '[%s]' "$1" ;; *) printf '%s' "$1" ;; esac; }
+
+# ---- keys ------------------------------------------------------------------------------------------------------------
+if [ "$sub" = keys ]; then
+  need php "site.json and the keys are read with it"
+  need age-keygen "the daily key is made with it (brew install age)"
+  php -r 'exit(function_exists("sodium_crypto_sign_keypair") ? 0 : 1);' 2> /dev/null \
+    || problem "this php has no sodium extension, which makes the pull key; install a php that has it (brew install php)."
+  made=""
+  # The daily key. What the Keychain says of each is its status alone.
+  pub=""; rc=0; pub="$(daily_public)" || rc=$?
+  case "$rc" in
+    0) echo "ok: this site's daily key is in the login Keychain already (the secret $DAILY), and was left as it is." ;;
+    1)
+      # age-keygen, down a pipe, into the Keychain: the private line goes one way and the public key the other
+      # (descriptor 3), and what age-keygen says beside (the public key again) is dropped.
+      out="$( { age-keygen 2> /dev/null | php "$KEYS" split-age 2> /dev/null | offprint_secret_set "$DAILY" > /dev/null 2>&1
+                echo ":${PIPESTATUS[0]}:${PIPESTATUS[1]}:${PIPESTATUS[2]}" >&3; } 3>&1 )"
+      case "$out" in
+        *":0:0:0") pub="${out%:0:0:0}"; pub="${pub%$'\n'}" ;;
+        *":3") problem "the login Keychain is locked, so the daily key couldn't be stored; unlock it, then run offprint pigeonhole keys again. Nothing was made." ;;
+        *":0:0:"*) problem "the daily key couldn't be stored in the login Keychain. Nothing was made." ;;
+        *) problem "age-keygen didn't make a key (is it age's own? brew install age). Nothing was made." ;;
+      esac
+      [[ "$pub" =~ $age_re ]] || problem "age-keygen didn't print a public key as it does. Look in Keychain Access for offprint, $SITE_NAME/$DAILY, and delete it before trying again."
+      # read back, as every later run will read it
+      again=""; again="$(daily_public)" || again=""
+      [ "$again" = "$pub" ] || problem "the daily key was stored, but didn't come back from the login Keychain as it went in. Look in Keychain Access for offprint, $SITE_NAME/$DAILY."
+      made=1
+      echo "ok: made this site's daily key, in the login Keychain (the secret $DAILY)." ;;
+    3) problem "the login Keychain is locked; unlock it, then run offprint pigeonhole keys again. Nothing was made." ;;
+    5) problem "what the login Keychain holds as this site's daily key (the secret $DAILY) is not an age private key. It was left as it is: look at it in Keychain Access (offprint, $SITE_NAME/$DAILY) before anything is made." ;;
+    *) problem "the login Keychain couldn't be read. Nothing was made." ;;
+  esac
+  echo "    Its public half, for site.json's pigeonhole.recipients (first in the list):"
+  echo "    $pub"
+
+  spub=""; rc=0; spub="$(pull_public)" || rc=$?
+  case "$rc" in
+    0) echo "ok: this site's pull key is in the login Keychain already (the secret $PULL), and was left as it is." ;;
+    1)
+      out="$( { php "$KEYS" pull-key 2> /dev/null | offprint_secret_set "$PULL" > /dev/null 2>&1
+                echo ":${PIPESTATUS[0]}:${PIPESTATUS[1]}" >&3; } 3>&1 )"
+      case "$out" in
+        *":0:0") spub="${out%:0:0}"; spub="${spub%$'\n'}" ;;
+        *":3") problem "the login Keychain is locked, so the pull key couldn't be stored; unlock it, then run offprint pigeonhole keys again." ;;
+        *":0:"*) problem "the pull key couldn't be stored in the login Keychain." ;;
+        *) problem "the pull key couldn't be made." ;;
+      esac
+      [[ "$spub" =~ $ssh_re ]] || problem "the pull key's public half didn't come out as one. Look in Keychain Access for offprint, $SITE_NAME/$PULL, and delete it before trying again."
+      again=""; again="$(pull_public)" || again=""
+      [ "$again" = "$spub" ] || problem "the pull key was stored, but didn't come back from the login Keychain as it went in. Look in Keychain Access for offprint, $SITE_NAME/$PULL."
+      made=1
+      echo "ok: made this site's pull key, in the login Keychain (the secret $PULL)." ;;
+    3) problem "the login Keychain is locked; unlock it, then run offprint pigeonhole keys again." ;;
+    5) problem "what the login Keychain holds as this site's pull key (the secret $PULL) is not one. It was left as it is: look at it in Keychain Access (offprint, $SITE_NAME/$PULL)." ;;
+    *) problem "the login Keychain couldn't be read." ;;
+  esac
+  echo "    Its public half (offprint pigeonhole print-server puts it where the servers need it):"
+  echo "    $spub"
+  echo
+  echo "Neither private key is anywhere but this Mac's login Keychain. A comment encrypted to the daily key alone is"
+  echo "lost with this Mac: make a recovery key somewhere else (age-keygen, kept off this Mac), and put its public"
+  echo "half second in pigeonhole.recipients."
+  [ -z "$made" ] || echo "Next: site.json's \"pigeonhole\" block (docs/reference.md), then offprint pigeonhole print-server."
+  exit 0
+fi
+
+# ---- print-server ----------------------------------------------------------------------------------------------------
+if [ "$sub" = print-server ]; then
+  which="$2"
+  need php "site.json and the keys are read with it"
+  [ -n "$SITE_PIGEONHOLE_PATH" ] || problem 'site.json has no "pigeonhole" block, so there is nothing to set a server up for (docs/reference.md).'
+  [ -n "$SITE_PIGEONHOLE_SERVER" ] || problem "site.json's \"pigeonhole\" block names no server yet: \"server\" (the store's address on the private network) and \"jump\" (the web server's own address) are needed here. Their two host keys are too, before site.json loads: each machine's is the first two words of its /etc/ssh/ssh_host_ed25519_key.pub."
+  [ "${#SITE_NAME}" -le 29 ] || problem "this site's name is over 29 characters, and the store's user for it (ph-NAME) could not be made: a user's name is 32 at most."
+  key=""; rc=0; key="$(pull_public)" || rc=$?
+  case "$rc" in
+    0) ;;
+    1) problem "this site's pull key isn't in the login Keychain yet; offprint pigeonhole keys makes it." ;;
+    3) problem "the login Keychain is locked, so the pull key's public half couldn't be read; unlock it, then try again." ;;
+    *) problem "the pull key's public half couldn't be read from the login Keychain (offprint pigeonhole keys says more)." ;;
+  esac
+  store_at="$(bracketed "$SITE_PIGEONHOLE_SERVER"):$SITE_PIGEONHOLE_STORE_PORT"
+  user="$(pigeonhole_store_user)"
+
+  if [ "$which" = web ]; then
+    cat <<WEB
+# Offprint pigeonhole: the web server's side, for the site $SITE_NAME ($SITE_PUBLIC_HOST).
+# Printed by offprint pigeonhole print-server web. Nothing here has been run: read it, then do each part yourself.
+
+# ---- 1. Caddy: inside the site's own block --------------------------------------------------------------------------
+# A comment is posted, encrypted, to one path of the site's own origin, and passed to the store on the private
+# network. Only POST to exactly that path: everything else is the static site's.
+#   - request_buffers: Caddy takes the whole of a request before it passes any of it on, so someone who sends a body
+#     a byte at a time holds a place in Caddy, not one of the store's few.
+#   - The store is told the visitor's address in one header, for a limit it holds in memory and never writes down.
+#     Caddy sets that header itself, in place of anything a visitor sent under its name. {client_ip} is the
+#     visitor's own only when Caddy knows which proxies stand in front of it (trusted_proxies, in the global
+#     options): with a proxy in front and that unset, every visitor would share the proxy's address and its limit.
+#   - What a browser says of itself and its user is taken off on the way: cookies, the referrer, the browser's
+#     name and hints, its languages, any credentials, and every other header that names an address. (A header no
+#     line here names is passed on as it came: the store reads none of them.)
+
+	@pigeonhole {
+		method POST
+		path $SITE_PIGEONHOLE_PATH
+	}
+	handle @pigeonhole {
+		request_body {
+			max_size 16KB
+		}
+		reverse_proxy $store_at {
+			request_buffers 16KB
+			header_up X-Pigeonhole-Client {client_ip}
+			header_up -X-Forwarded-For
+			header_up -X-Forwarded-Host
+			header_up -X-Forwarded-Proto
+			header_up -Via
+			header_up -Cookie
+			header_up -Referer
+			header_up -User-Agent
+			header_up -Origin
+			header_up -Authorization
+			header_up -Accept-Language
+			header_up -Forwarded
+			header_up -X-Real-IP
+			header_up -Sec-*
+			header_up -CF-*
+			header_up -True-Client-IP
+			transport http {
+				dial_timeout 3s
+				response_header_timeout 10s
+			}
+		}
+	}
+
+# ---- 2. The user the Mac's ssh passes through, as root ---------------------------------------------------------------
+# This site's pull key may do one thing on this machine: open a connection on to the store's ssh. It gets no shell,
+# no terminal and no other forwarding: no other address to connect on to (permitopen), and no port of this machine's
+# to listen on (permitlisten names one no user may open; sshd's own rule, below, forbids the rest). Should it ask for a command, it is given nologin, whatever
+# the user's shell. The user's folder and its authorized_keys are root's, so the user can't change what its key may
+# do. A line for this site from an earlier set-up (another store address, say) is replaced, not kept beside the new.
+
+id $PIGEONHOLE_JUMP_USER > /dev/null 2>&1 || useradd --system --user-group --home-dir /var/lib/$PIGEONHOLE_JUMP_USER --no-create-home --shell /usr/sbin/nologin $PIGEONHOLE_JUMP_USER
+usermod -p '*' $PIGEONHOLE_JUMP_USER
+install -d -m 755 -o root -g root /var/lib/$PIGEONHOLE_JUMP_USER /var/lib/$PIGEONHOLE_JUMP_USER/.ssh
+touch /var/lib/$PIGEONHOLE_JUMP_USER/.ssh/authorized_keys
+chmod 644 /var/lib/$PIGEONHOLE_JUMP_USER/.ssh/authorized_keys
+sed -i '/ offprint-pigeonhole-$SITE_NAME\$/d' /var/lib/$PIGEONHOLE_JUMP_USER/.ssh/authorized_keys
+printf '%s\n' 'restrict,port-forwarding,permitopen="$(bracketed "$SITE_PIGEONHOLE_SERVER"):$SITE_PIGEONHOLE_SERVER_PORT",permitlisten="127.0.0.1:1",command="/usr/sbin/nologin" $key offprint-pigeonhole-$SITE_NAME' >> /var/lib/$PIGEONHOLE_JUMP_USER/.ssh/authorized_keys
+
+# A key's own line can't forbid everything: a listening socket (ssh -R /path) is not a port, and no option there
+# stops it. sshd itself does, for this user alone. (Debian and Ubuntu read /etc/ssh/sshd_config.d/*.conf from the
+# top of sshd_config: check that yours does. "Match all" ends the part that is this user's, so nothing after it in
+# sshd's own file is taken for this user's alone.) sshd -t reads the whole configuration before it is used.
+
+cat > /etc/ssh/sshd_config.d/offprint-$PIGEONHOLE_JUMP_USER.conf <<'SSHD'
+Match User $PIGEONHOLE_JUMP_USER
+	AllowTcpForwarding local
+	AllowStreamLocalForwarding no
+	PermitListen none
+	AllowAgentForwarding no
+	X11Forwarding no
+	PermitTunnel no
+	PermitTTY no
+Match all
+SSHD
+chmod 644 /etc/ssh/sshd_config.d/offprint-$PIGEONHOLE_JUMP_USER.conf
+sshd -t
+systemctl reload ssh 2> /dev/null || systemctl reload sshd 2> /dev/null || kill -HUP "\$(cat /run/sshd.pid)"
+
+# ---- 3. To check, and to tell site.json ------------------------------------------------------------------------------
+# This machine's ssh host key, for site.json's "jump_host_key" (its first two words):
+#   cut -d ' ' -f 1,2 /etc/ssh/ssh_host_ed25519_key.pub
+# Its ssh must be reachable from your Mac on port $SITE_PIGEONHOLE_JUMP_PORT, and it must reach the store at
+# $SITE_PIGEONHOLE_SERVER on ports $SITE_PIGEONHOLE_SERVER_PORT (ssh) and $SITE_PIGEONHOLE_STORE_PORT (the store).
+# Then, on the Mac: offprint pigeonhole doctor
+WEB
+    exit 0
+  fi
+
+  web="$3"
+  php -r 'exit(filter_var($argv[1], FILTER_VALIDATE_IP) !== false && inet_ntop(inet_pton($argv[1])) === $argv[1] ? 0 : 1);' -- "$web" 2> /dev/null \
+    || problem "the web server's address on the private network must be an address (like 10.0.0.2), written as site.json writes one; $(_offprint_shown "$web" | cut -c1-60) isn't."
+  [ "$web" != "$SITE_PIGEONHOLE_SERVER" ] || problem "that is the store's own address (site.json's pigeonhole.server); the one wanted is the web server's, on the same private network."
+  for f in store.js pull.js setup.sh; do
+    [ -f "$TOOL/pigeonhole/server/$f" ] && [ ! -L "$TOOL/pigeonhole/server/$f" ] || problem "this Offprint has no pigeonhole/server/$f."
+    # (each goes inside a here-document that ends at this word on a line of its own)
+    ! grep -qx "OFFPRINT_PIGEONHOLE_END" "$TOOL/pigeonhole/server/$f" || problem "pigeonhole/server/$f can't be printed inside the script."
+  done
+  cat <<HEAD
+#!/bin/bash
+# Offprint pigeonhole: the store's side, for the site $SITE_NAME ($SITE_PUBLIC_HOST).
+# Printed by offprint pigeonhole print-server store. Nothing here has been run: read it, then run it as root on the
+# store's machine (Debian or Ubuntu). What it makes is listed where its second part starts.
+PH_SITE='$SITE_NAME'
+PH_PATH='$SITE_PIGEONHOLE_PATH'
+PH_LISTEN='$store_at'
+PH_KEY='$key'
+PH_WEB='$web'
+PH_SSH_PORT='$SITE_PIGEONHOLE_SERVER_PORT'
+
+# The store itself, and the one command the Mac may run on it: written out by the second part.
+write_store_js() {
+cat > "\$1" <<'OFFPRINT_PIGEONHOLE_END'
+HEAD
+  cat "$TOOL/pigeonhole/server/store.js"
+  cat <<'MID'
+OFFPRINT_PIGEONHOLE_END
+}
+write_pull_js() {
+cat > "$1" <<'OFFPRINT_PIGEONHOLE_END'
+MID
+  cat "$TOOL/pigeonhole/server/pull.js"
+  cat <<'END'
+OFFPRINT_PIGEONHOLE_END
+}
+
+END
+  cat "$TOOL/pigeonhole/server/setup.sh"
+  exit 0
+fi
+
+# ---- doctor ----------------------------------------------------------------------------------------------------------
+bad=0
+ok() { printf 'ok: %s\n' "$1"; }
+no() { printf 'problem: %s\n' "$1"; bad=1; }
+finish() {
+  if [ "$bad" = 0 ]; then exit 0; fi
+  exit 1
+}
+
+# 1. The settings.
+if [ -z "$SITE_PIGEONHOLE_PATH" ]; then
+  no 'site.json has no "pigeonhole" block, so this site takes no comments. docs/reference.md says what goes in one; offprint pigeonhole keys makes the keys first.'
+  finish
+fi
+ok "site.json has a pigeonhole block: comments are posted to $SITE_PUBLIC_URL$SITE_PIGEONHOLE_PATH."
+have_server=1
+if [ -z "$SITE_PIGEONHOLE_SERVER" ]; then
+  have_server=0
+  no "the block names no server (\"server\", \"server_host_key\", \"jump\", \"jump_host_key\"), so nothing can be fetched."
+else
+  ok "it names its server: the store at $SITE_PIGEONHOLE_SERVER, reached through the web server at $SITE_PIGEONHOLE_JUMP."
+fi
+case "$SITE_PIGEONHOLE_RECIPIENTS" in
+  *" "*) ok "comments are encrypted to two keys: the daily key and a recovery key." ;;
+  *) ok "comments are encrypted to one key. With no recovery key, a comment not yet collected is lost if this Mac's Keychain is: consider a second recipient, made and kept somewhere else." ;;
+esac
+
+# 2. The host: its adapter must say that it forwards the path, or a publish refuses the block.
+if offprint_adapter_load 2> /dev/null; then
+  LOADED=1
+  if [ "$ADAPTER_PIGEONHOLE" = 1 ]; then ok "the site's adapter ($ADAPTER_NAME) says its host forwards the path."
+  else no "the site's adapter ($ADAPTER_NAME) doesn't say its host forwards the path (ADAPTER_PIGEONHOLE=1), so a publish refuses this site while it has the block. Only a host with a web server of your own can take comments."; fi
+  offprint_adapter_stop; offprint_adapter_cleanup; LOADED=0
+else
+  no "the site's adapter couldn't be loaded: $(printf '%s' "${OFFPRINT_ADAPTER_PROBLEM:-no reason given}" | head -n 1 | cut -c1-300)"
+fi
+
+# 3. The programs.
+missing=""
+for tool in php age age-keygen ssh ssh-agent ssh-add curl; do
+  command -v "$tool" > /dev/null 2>&1 || missing="${missing:+$missing, }$tool"
+done
+if [ -n "$missing" ]; then
+  no "not on the PATH: $missing (age and age-keygen: brew install age). The rest can't be checked without them."
+  finish
+fi
+ok "php, age, age-keygen, ssh, ssh-agent, ssh-add and curl are on the PATH."
+
+# 4. The daily key: there, and one of the keys comments are encrypted to.
+have_daily=0
+pub=""; rc=0; pub="$(daily_public)" || rc=$?
+case "$rc" in
+  0)
+    case " $SITE_PIGEONHOLE_RECIPIENTS " in
+      *" $pub "*) have_daily=1; ok "the daily key is in the login Keychain, and is one of the keys comments are encrypted to." ;;
+      *) no "the daily key in the login Keychain is not one of site.json's pigeonhole.recipients, so it opens nothing sent to them. Its public half is $pub: put that first in the list (then offprint compose up -d, and publish)." ;;
+    esac ;;
+  1) no "this site's daily key isn't in the login Keychain; offprint pigeonhole keys makes it." ;;
+  3) no "the login Keychain is locked, so the keys couldn't be read; unlock it, then run the doctor again." ;;
+  5) no "what the login Keychain holds as this site's daily key (the secret $DAILY) is not an age private key." ;;
+  *) no "the daily key couldn't be read from the login Keychain." ;;
+esac
+
+# 5. The pull key, the two hops and the pull command, in one ssh: the store's list.
+reached=0
+if [ "$have_server" = 1 ]; then
+  if ! pigeonhole_box; then no "$PIGEONHOLE_PROBLEM"; finish; fi
+  if ! pigeonhole_lock; then printf 'problem: %s\n' "$PIGEONHOLE_PROBLEM"; exit 75; fi
+  if ! offprint_private_dir offprint-pigeonhole TMP; then
+    no "couldn't make a private folder for this run${OFFPRINT_PRIVATE_PROBLEM:+: $OFFPRINT_PRIVATE_PROBLEM}."
+    finish
+  fi
+  if pigeonhole_ssh_open "$TMP"; then
+    ok "the pull key is in the login Keychain, and this run's own ssh-agent took it."
+    listed=""; rc=0
+    listed="$(pigeonhole_ssh list | head -c $((PIGEONHOLE_MAX_NAMES * 70 + 1)); exit "${PIPESTATUS[0]}")" || rc=$?
+    if [ "$rc" != 0 ]; then
+      pigeonhole_ssh_why "$rc"; no "$PIGEONHOLE_PROBLEM"
+    elif [ -n "$listed" ] && printf '%s\n' "$listed" | grep -qvE '^[0-9a-f]{64}\.age$'; then
+      no "the pigeonhole's server answered, but not as its pull command does. Is its authorized_keys line the one this Offprint prints? (offprint pigeonhole print-server store)"
+    else
+      reached=1
+      held=0; [ -z "$listed" ] || held="$(printf '%s\n' "$listed" | grep -c .)"
+      ok "ssh reached the web server and, through it, the pigeonhole's server; each showed the host key site.json pins, and the pull command answered ($held held there now)."
+    fi
+  else
+    no "$PIGEONHOLE_PROBLEM"
+  fi
+fi
+
+# 6. The public path. A GET is the static site's to answer, and there is no such file: anything but a refusal means
+# something else answers there.
+origin="${PIGEONHOLE_CHECK_ORIGIN:-$SITE_PUBLIC_URL}"
+if ! [[ "$origin" =~ ^https?://[A-Za-z0-9.:-]+$ ]]; then no "PIGEONHOLE_CHECK_ORIGIN isn't an origin (https://host)."; finish; fi
+code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 "$origin$SITE_PIGEONHOLE_PATH" 2> /dev/null | head -c 3)" || code=""
+[[ "$code" =~ ^[0-9]{3}$ ]] || code=000
+get_ok=0
+case "$code" in
+  4??) get_ok=1; ok "the public site refuses a GET of the path ($code): only a POST is passed on." ;;
+  000) no "the public site couldn't be reached at $origin (is this Mac online?), so the path wasn't checked." ;;
+  *) no "the public site answers a GET of $SITE_PIGEONHOLE_PATH with $code, where a refusal (404 or 405) was expected: something else is at that path. Choose another pigeonhole.path, or look at the web server's lines (offprint pigeonhole print-server web)." ;;
+esac
+
+# 7. The canary: a test submission, encrypted to the site's keys as a page's script encrypts, posted to the public
+# path as a browser posts (no content type, no header of its own), then fetched back and opened.
+# (Not for a site that names no server: a canary that can never be fetched back would only sit on the store.)
+if [ "$get_ok" = 1 ] && [ "$have_server" = 1 ]; then
+  args=(); for r in $SITE_PIGEONHOLE_RECIPIENTS; do args+=(-r "$r"); done
+  [ -n "$TMP" ] || offprint_private_dir offprint-pigeonhole TMP || { no "couldn't make a private folder for this run."; finish; }
+  # canary | age | prove | curl: nothing of it in a file but its name (the sha256 of what was sent), which is public.
+  code="$( { php "$KEYS" canary 2> /dev/null | age "${args[@]}" 2> /dev/null | php "$KEYS" prove "$BITS" 3> "$TMP/name" 2> /dev/null \
+             | curl -sS -o /dev/null -w '%{http_code}' --max-time 20 -X POST -H 'Content-Type:' -H 'Expect:' --data-binary @- "$origin$SITE_PIGEONHOLE_PATH" 2> /dev/null
+             echo ":${PIPESTATUS[1]}:${PIPESTATUS[2]}:${PIPESTATUS[3]}"; } )"
+  name="$(head -c 70 "$TMP/name" 2> /dev/null | head -n 1)"
+  posted=0
+  case "$code" in
+    204:0:0:0) if [[ "$name" =~ ^[0-9a-f]{64}\.age$ ]]; then posted=1; ok "a test submission was posted through the public site, and the store kept it (204)."; else no "the test submission couldn't be made."; fi ;;
+    *:0:0:*)
+      code="${code%%:*}"; [[ "$code" =~ ^[0-9]{3}$ ]] || code=000
+      case "$code" in
+        404|405) no "the web server answered the test submission with $code: it doesn't pass a POST to $SITE_PIGEONHOLE_PATH on to the store. Are the Caddy lines in the site's block? (offprint pigeonhole print-server web)" ;;
+        502|503|504) no "the web server passes the path on, but the store didn't answer it ($code). Is the store running (systemctl status pigeonhole@$SITE_NAME on its machine), and does its firewall let the web server reach port $SITE_PIGEONHOLE_STORE_PORT?" ;;
+        400) no "the store refused the test submission (400): the web server must name the visitor's address in the X-Pigeonhole-Client header (offprint pigeonhole print-server web)." ;;
+        403) no "the store refused the test submission's proof of work (403): its PIGEONHOLE_BITS must be $BITS, as a page's script makes." ;;
+        413) no "the test submission was refused for its size (413): the store, or the web server's body limit, expects another." ;;
+        429) no "the store has taken as many submissions from this address, or from everyone, as it takes in an hour (429). Nothing is wrong with the path; run the doctor again in an hour to send a test through it." ;;
+        507) no "the store is full (507): fetch what it holds (offprint collect), and look at why it wasn't fetched." ;;
+        000) no "the public site couldn't be reached to post the test submission." ;;
+        *) no "the public site answered the test submission with $code, where 204 was expected." ;;
+      esac ;;
+    *) no "the test submission couldn't be made (age or php failed), so nothing was posted." ;;
+  esac
+
+  if [ "$posted" = 1 ] && [ "$reached" = 1 ]; then
+    if pigeonhole_fetch; then
+      if [ -f "$SPOOL/$name" ]; then
+        ok "it was fetched to this Mac, and removed from the store."
+        others=$((FETCHED - 1))
+        if [ "$have_daily" = 1 ]; then
+          unset identity; identity=""
+          identity="$(offprint_secret_get "$DAILY" 2> /dev/null)" || identity=""
+          opened="$(printf '%s\n' "$identity" | age -d -i - "$SPOOL/$name" 2> /dev/null | php "$TOOL/lib/pigeonhole.php" check 2> /dev/null | head -c 40)" || opened=""
+          identity=""; unset identity
+          case "$opened" in
+            '{"v":1,"kind":"canary",'*)
+              mv -f -- "$SPOOL/$name" "$DONE/$name" 2> /dev/null || true
+              ok "the daily key opened it: a comment sent now would reach this Mac, and only this Mac can read it." ;;
+            *) no "the test submission came back, but the daily key didn't open it. It is left in the spool; offprint collect will move it aside with its reason." ;;
+          esac
+        else
+          no "the test submission came back, but there is no daily key to open it with (see above). It waits in the spool."
+        fi
+        [ "$others" -le 0 ] || ok "$others more that visitors sent came with it, and wait to be opened (offprint collect)."
+      else
+        no "the store said it kept the test submission, but the fetch didn't bring it back. Is the store the web server passes to (port $SITE_PIGEONHOLE_STORE_PORT, the path $SITE_PIGEONHOLE_PATH) the instance whose folder the pull command reads?"
+      fi
+      pigeonhole_fetch_status true
+    else
+      no "$PIGEONHOLE_PROBLEM"
+      pigeonhole_fetch_status false
+    fi
+  elif [ "$posted" = 1 ]; then
+    no "the test submission is on the store, but the fetch couldn't be tried (see above). The next fetch that works brings it, and offprint collect drops it."
+  fi
+fi
+finish

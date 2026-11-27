@@ -83,6 +83,20 @@ function page( config, options = {} ) {
 	list.appendChild( old );
 	const button = element( 'li' );
 	list.appendChild( button );
+	// for a site that takes comments: the count beside the title, one old line, and the second button
+	let count = null;
+	let collect = null;
+	if ( options.comments ) {
+		count = element( 'span' );
+		count.className = 'offprint-count';
+		count.textContent = ' · 1 comment to check';
+		node.appendChild( count );
+		const oldComment = element( 'li' );
+		oldComment.className = 'offprint-comments-line';
+		list.appendChild( oldComment );
+		collect = element( 'li' );
+		list.appendChild( collect );
+	}
 
 	const timers = [];
 	const fetched = [];
@@ -90,7 +104,7 @@ function page( config, options = {} ) {
 	const listeners = {};
 	const document = {
 		readyState: options.loading ? 'loading' : 'complete',
-		getElementById: ( id ) => ( { 'wp-admin-bar-offprint': node, 'wp-admin-bar-offprint-now': button }[ id ] || null ),
+		getElementById: ( id ) => ( { 'wp-admin-bar-offprint': node, 'wp-admin-bar-offprint-now': button, 'wp-admin-bar-offprint-collect': collect }[ id ] || null ),
 		createElement: element,
 		addEventListener: ( type, listener ) => {
 			listeners[ type ] = listener;
@@ -120,6 +134,8 @@ function page( config, options = {} ) {
 		label,
 		list,
 		button,
+		count,
+		collect,
 		fetched,
 		listeners,
 		// the timer waiting now, if any
@@ -259,4 +275,35 @@ test( 'waits for the page when it is still loading', () => {
 	assert.strictEqual( p.next(), undefined );
 	p.listeners.DOMContentLoaded();
 	assert.ok( p.next() );
+} );
+
+test( 'comments: the count beside the title and the lines above their button are kept current, as text', async () => {
+	const p = page( CONFIG, { comments: true } );
+	await p.answer( view( { poll: true, lines: [ 'Commit abc1234' ], comments: { count: 3, label: ' · 3 comments to check', pending: true, stuck: false, lines: [ 'Comments: checking…', '<b>3</b> have arrived' ] } } ) );
+	assert.strictEqual( p.count.textContent, ' · 3 comments to check' );
+	const kinds = p.list.children.map( ( child ) => child.className || ( child === p.button ? 'publish button' : 'collect button' ) );
+	assert.deepStrictEqual( kinds, [ 'offprint-line', 'publish button', 'offprint-comments-line', 'offprint-comments-line', 'collect button' ] );
+	assert.deepStrictEqual( p.list.children.filter( ( c ) => c.className === 'offprint-comments-line' ).map( ( c ) => c.children[ 0 ].textContent ), [ 'Comments: checking…', '<b>3</b> have arrived' ] );
+	assert.strictEqual( p.list.children[ 0 ].children[ 0 ].textContent, 'Commit abc1234' );
+	assert.strictEqual( p.peek().wait, 5000, 'it goes on looking while a check is waiting' );
+} );
+
+test( 'comments: when none wait the count is emptied, and the old lines go', async () => {
+	const p = page( CONFIG, { comments: true } );
+	await p.answer( view( { comments: { count: 0, label: '', pending: false, stuck: false, lines: [ 'Comments: none waiting to be checked.' ] } } ) );
+	assert.strictEqual( p.count.textContent, '' );
+	assert.deepStrictEqual( p.list.children.filter( ( c ) => c.className === 'offprint-comments-line' ).map( ( c ) => c.children[ 0 ].textContent ), [ 'Comments: none waiting to be checked.' ] );
+} );
+
+test( 'comments: an answer with no comments part (a site that takes none) leaves that part of the node alone', async () => {
+	const p = page( CONFIG, { comments: true } );
+	await p.answer( view( { lines: [ 'one' ] } ) );
+	assert.strictEqual( p.count.textContent, ' · 1 comment to check' );
+	assert.strictEqual( p.list.children.filter( ( c ) => c.className === 'offprint-comments-line' ).length, 1 );
+} );
+
+test( 'comments: a page without the comments part (a user who may not moderate) is not broken by an answer that has one', async () => {
+	const p = page( CONFIG );
+	await p.answer( view( { lines: [ 'one' ], comments: { count: 2, label: ' · 2 comments to check', pending: false, stuck: false, lines: [ 'x' ] } } ) );
+	assert.deepStrictEqual( p.list.children.map( ( c ) => c.className ), [ 'offprint-line', '' ] );
 } );

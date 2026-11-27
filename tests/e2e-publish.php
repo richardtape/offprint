@@ -3,10 +3,13 @@
  * Run by tests/e2e.sh in the throwaway WordPress: `wp eval-file - MODE [ARGS] [--user=LOGIN]`.
  *   bar [INBOX]            the offprint admin-bar node as the current user sees it: "title:",
  *                          "tone:", a "line:" for each line under it, "button:", and each one's "raw:" HTML;
- *                          with OFFPRINT_INBOX set to INBOX if given
+ *                          with OFFPRINT_INBOX set to INBOX if given. For a site that takes comments, also
+ *                          "count:" (what stands beside the title), a "comments:" for each line about them, and
+ *                          "collect:" (the second button)
  *   request INBOX REASON   Request::request( REASON ), with OFFPRINT_INBOX set to INBOX
  *   auth LOGIN             a Cookie header that logs LOGIN in to wp-admin, then that session's nonces
- *                          for the request button, for the status, and for the REST API
+ *                          for the request button, for the status, for the REST API, and for the
+ *                          Check for comments button
  * Any PHP notice, warning or deprecation is printed as a "php:" line, so the test can fail on it.
  */
 set_error_handler(
@@ -33,9 +36,13 @@ switch ( $args[0] ?? '' ) {
 		preg_match( '#<span class="offprint-label"[^>]*>(.*?)</span>#s', $node->title, $label );
 		preg_match( '/\boffprint-(live|busy|failed|idle)\b/', $node->meta['class'] ?? '', $tone );
 		echo 'title: ', $text( $label[1] ?? '' ), "\n", 'tone: ', $tone[1] ?? '', "\n", 'raw: ', $node->title, "\n";
+		if ( preg_match( '#<span class="offprint-count"[^>]*>(.*?)</span>#s', $node->title, $count ) ) {
+			echo 'count: ', $text( $count[1] ), "\n";
+		}
 		foreach ( $bar->get_nodes() as $child ) {
 			if ( 'offprint' === $child->parent ) {
-				echo 'offprint-now' === $child->id ? 'button: ' : 'line: ', $text( $child->title ), "\n", 'raw: ', $child->title, "\n";
+				$kind = 'offprint-now' === $child->id ? 'button' : ( 'offprint-collect' === $child->id ? 'collect' : ( 0 === strpos( $child->id, 'offprint-comments-' ) ? 'comments' : 'line' ) );
+				echo $kind, ': ', $text( $child->title ), "\n", 'raw: ', $child->title, "\n";
 			}
 		}
 		break;
@@ -59,6 +66,7 @@ switch ( $args[0] ?? '' ) {
 			'; ', LOGGED_IN_COOKIE, '=', $logged_in, "\n",
 			wp_create_nonce( 'offprint_request' ), "\n",
 			wp_create_nonce( 'offprint_status' ), "\n",
-			wp_create_nonce( 'wp_rest' ), "\n";
+			wp_create_nonce( 'wp_rest' ), "\n",
+			wp_create_nonce( 'offprint_collect' ), "\n";
 		break;
 }

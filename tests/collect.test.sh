@@ -144,7 +144,7 @@ clean "$t"
 
 newcase; collect extra; t="an argument"
 check "$t: exits 2" 2 "$code"
-check "$t: the usage line" "usage: offprint collect" "$out"
+check "$t: the usage line" "usage: offprint collect [--no-fetch | --fetch-only [--notify]]" "$out"
 
 # ---- a comment, to WordPress ---------------------------------------------------------------------------------------
 newcase; comment; first="$blob"; collect; t="one good comment"
@@ -339,7 +339,7 @@ else
 fi
 
 newcase; comment; mkdir "$c/var/publish.lock"; echo 1 > "$c/var/publish.lock/pid"; collect; t="a publish holds the lock"
-check "$t: exits 1" 1 "$code"
+check "$t: exits 75, as a publish does for a lock" 75 "$code"
 check "$t: says so" "problem: a publish is running, or left its lock (var/publish.lock); wait for it, then collect again." "$out"
 check "$t: the lock is left as it was" 1 "$(cat "$c/var/publish.lock/pid")"
 check "$t: the comment is still in the spool" 1 "$(count "$SP")"

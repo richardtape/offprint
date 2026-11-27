@@ -64,6 +64,7 @@ cat > "$tmp/bin/curl" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >> "$STUB_DIR/curl.calls"
 for url; do :; done; path="${url%%\?*}"; path="${path#https://www.example.com/}"
+case "$path" in ""|*/) path="${path}index.html" ;; esac   # a folder's address is its index.html, as a web server answers
 if [ -f "$STUB_DIR/live_fail_first" ] && [ "$path" = offprint.json ] \
    && [ "$(grep -c 'offprint\.json' "$STUB_DIR/curl.calls")" -le "$(cat "$STUB_DIR/live_fail_first")" ]; then
   echo "curl: (56) The requested URL returned error: 404" >&2; exit 56
@@ -1220,6 +1221,124 @@ adapter_confirm() { return 0; }
 A
 pub; t="no pigeonhole block, and an adapter that doesn't say: nothing to refuse"
 check "$t: the publish ends well" 0 "$code"
+
+# === after "Live": the live site must serve the comment form, and its two scripts, as they were published ===
+# Whoever can change a page or a script between the host and a visitor (the host itself, a proxy in front) reads every
+# comment from then on. The publish can't stop that; it looks, once the live site serves it, and says so loudly.
+# comment_site: the export has a page with a comment form (hello/), and the two scripts
+comment_site() {
+  mkdir -p "$S/fixture/hello" "$S/fixture/wp-content/mu-plugins/offprint"
+  printf '<html><body><p>Hello</p><form action="/_pigeonhole" method="dialog" data-offprint-pigeonhole="1"><textarea name="comment"></textarea><input type="text" name="offprint_hp" value=""></form><script type="application/json" id="offprint-pigeonhole">{"path":"/_pigeonhole","recipients":["%s"],"bits":18}</script></body></html>\n' "$PH_KEY" > "$S/fixture/hello/index.html"
+  cp "$SRC/plugin/offprint/pigeonhole.js" "$SRC/plugin/offprint/pigeonhole-loader.js" "$S/fixture/wp-content/mu-plugins/offprint/"
+}
+takes_comments() {
+  newcase; adapter x <<'A'
+ADAPTER_PIGEONHOLE=1
+adapter_confirm() { return 0; }
+A
+  with_pigeonhole; comment_site
+}
+# served: what the live site serves is a copy of the published site (in $S/live), for a case to change
+served() { mkdir -p "$S/live"; cp -R "$c/site/." "$S/live/"; touch "$S/live_dir"; }
+warnings() { js warnings; }
+action="Action needed: the live site is not serving the comment form this publish made"
+takes_comments; touch "$S/live_site"; pub; t="the live site serves what was published"; sha="$(git -C "$c" rev-parse HEAD)"
+check "$t: live, with no warning" "0|live|[]" "$code|$(js state)|$(warnings)"
+id="$(git -C "$c" rev-parse HEAD:site)"
+for f in "hello/" "wp-content/mu-plugins/offprint/pigeonhole.js" "wp-content/mu-plugins/offprint/pigeonhole-loader.js"; do
+  check "$t: /$f was asked of the public site, as a new address each publish" 1 "$(grep -c -- "--max-time 15 https://www.example.com/$f?p=[0-9a-f]\{40\}$" "$S/curl.calls")"
+done
+contains "$t: the log says it was looked at" "the live site serves the comment form, its scripts and the page's own as they were published (/hello/index.html)" "$(cat "$c/var/publish.log")"
+check "$t: nothing fetched is left in TMPDIR or var/" "" "$(ls "$TMPDIR" 2>/dev/null | grep offprint-live)$(ls "$c/var" | grep -i live)"
+: > "$S/curl.calls"; pub; t="... and again, with nothing new"
+check "$t: unchanged, no warning, and looked at again" "0|unchanged|[]|3" "$code|$(js state)|$(warnings)|$(grep -c '?p=' "$S/curl.calls")"
+
+takes_comments; touch "$S/live_site"; pub; served; rm "$S/live_site"
+OTHER_KEY="age1$(printf 'z%.0s' $(seq 1 58))"
+sed "s/$PH_KEY/$OTHER_KEY/" "$c/site/hello/index.html" > "$S/live/hello/index.html"
+echo '<p>changed</p>' >> "$S/fixture/index.html"; pub; t="the live page names another key"; sha="$(git -C "$c" rev-parse HEAD)"
+check "$t: the publish is live all the same: nothing is undone" "0|live|The site is live at ${sha:0:7}|$sha" "$code|$(js state)|$(js message)|$(git -C "$O" rev-parse main)"
+contains "$t: said loudly, with what is wrong and where" "$action (hello/index.html: its comment form's settings (the offprint-pigeonhole block) are not right: its keys are not site.json's." "$(warnings)"
+contains "$t: and what it means" "A comment sent from the live site now may be readable by someone else, or reach nobody. The files published are right" "$(warnings)"
+contains "$t: printed at the terminal too" "  $action" "$out"
+lacks_text() { case "$2" in *"$3"*) bad "$1" ;; *) ok "$1" ;; esac; }
+lacks_text "$t: the other key is not repeated" "$(warnings)$out" "$OTHER_KEY"
+pub; t="... and a publish with nothing new, while it is still so"
+check "$t: unchanged, and said again" "0|unchanged" "$code|$(js state)"
+contains "$t: the warning" "$action" "$(warnings)"
+
+takes_comments; touch "$S/live_site"; pub; served; rm "$S/live_site"
+echo '/* one more line */' >> "$S/live/wp-content/mu-plugins/offprint/pigeonhole.js"
+echo '<p>changed</p>' >> "$S/fixture/index.html"; pub; t="the live script is not the one published"
+check "$t: live" "0|live" "$code|$(js state)"
+contains "$t: said loudly" "$action (wp-content/mu-plugins/offprint/pigeonhole.js" "$(warnings)"
+takes_comments; touch "$S/live_site"; pub; served; rm "$S/live_site"
+echo 'export {};' > "$S/live/wp-content/mu-plugins/offprint/pigeonhole-loader.js"
+echo '<p>changed</p>' >> "$S/fixture/index.html"; pub; t="the live loader is another script"
+contains "$t: said loudly" "$action (wp-content/mu-plugins/offprint/pigeonhole-loader.js" "$(warnings)"
+takes_comments; touch "$S/live_site"; pub; served; rm "$S/live_site"
+sed 's/method="dialog"/method="post"/' "$c/site/hello/index.html" > "$S/live/hello/index.html"
+echo '<p>changed</p>' >> "$S/fixture/index.html"; pub; t="the live form can post by itself"
+contains "$t: said loudly" "$action (hello/index.html" "$(warnings)"
+takes_comments; touch "$S/live_site"; pub; served; rm "$S/live_site"
+echo '<html><body><p>Hello</p></body></html>' > "$S/live/hello/index.html"
+echo '<p>changed</p>' >> "$S/fixture/index.html"; pub; t="the live page has no comment form at all"
+check "$t: live" "0|live" "$code|$(js state)"
+contains "$t: said loudly" "$action (/hello/index.html has no comment form's settings there, and has them here). Nobody can comment on it as it is served." "$(warnings)"
+takes_comments; touch "$S/live_site"; pub; served; rm "$S/live_site"
+printf '<html><body><form action="/_pigeonhole" method="post"><input name="comment"></form>\033[31m \001 $(touch %s/pwned) <script type="application/json" id="offprint-pigeonhole">{"path":"/_pigeonhole","recipients":["%s"],"bits":18}</script></body></html>' "$S" "$PH_KEY" > "$S/live/hello/index.html"
+echo '<p>changed</p>' >> "$S/fixture/index.html"; pub; t="the live page is a stranger's, with control characters and a shell's words"
+contains "$t: said loudly" "$action" "$(warnings)"
+check "$t: nothing of it runs, and no control character reaches the status" "no 0" "$([ -e "$S/pwned" ] && echo yes || echo no) $(LC_ALL=C grep -c '[[:cntrl:]]' <<< "$(warnings)")"
+takes_comments; touch "$S/live_site"; pub; served; rm "$S/live_site"
+head -c 5000000 /dev/zero | tr '\0' 'a' > "$S/live/wp-content/mu-plugins/offprint/pigeonhole.js"
+echo '<p>changed</p>' >> "$S/fixture/index.html"; pub; t="the live script is five megabytes"
+contains "$t: said loudly (though curl fails when no more of it is taken), and no more of it read than the limit" "$action (it answers /wp-content/mu-plugins/offprint/pigeonhole.js with something far larger than what was published)" "$(warnings)"
+check "$t: nothing fetched is left" "" "$(ls "$TMPDIR" 2>/dev/null | grep offprint-live)"
+
+takes_comments; touch "$S/live_site"; pub; served; rm "$S/live_site"
+rm "$S/live/wp-content/mu-plugins/offprint/pigeonhole-loader.js"
+echo '<p>changed</p>' >> "$S/fixture/index.html"; pub; t="the live site answers an error for a script the publish has"
+check "$t: live" "0|live" "$code|$(js state)"
+contains "$t: said loudly: it was just confirmed to serve this publish, which has the file" "$action (it answers /wp-content/mu-plugins/offprint/pigeonhole-loader.js with an error, where the publish has that file)." "$(warnings)"
+takes_comments; touch "$S/live_site"; pub; served; rm "$S/live_site"
+rm "$S/live/hello/index.html"
+echo '<p>changed</p>' >> "$S/fixture/index.html"; pub; t="the live site answers an error for the page itself"
+contains "$t: said loudly" "$action (it answers /hello/index.html with an error" "$(warnings)"
+
+# One script added to the page on its way reads a comment as it is typed, whatever keys the page names.
+takes_comments; touch "$S/live_site"; pub; served; rm "$S/live_site"
+sed 's#</body>#<script src="https://other.example.com/x.js"></script></body>#' "$c/site/hello/index.html" > "$S/live/hello/index.html"
+echo '<p>changed</p>' >> "$S/fixture/index.html"; pub; t="the live page loads one script more than the published page"
+check "$t: live" "0|live" "$code|$(js state)"
+contains "$t: said loudly, with counts and nothing of the page" "$action (hello/index.html: the page runs 2 scripts as the live site serves it, and 1 as it was published; the first that differs is number 2)." "$(warnings)"
+lacks_text "$t: the script's address is not repeated" "$(warnings)$out" "other.example.com"
+takes_comments; touch "$S/live_site"; pub; served; rm "$S/live_site"
+sed 's#<p>Hello</p>#<script>document.forms[0].addEventListener("input", steal)</script><p>Hello</p>#' "$c/site/hello/index.html" > "$S/live/hello/index.html"
+echo '<p>changed</p>' >> "$S/fixture/index.html"; pub; t="the live page has a script written into it"
+contains "$t: said loudly" "$action (hello/index.html: the page runs 2 scripts as the live site serves it, and 1 as it was published; the first that differs is number 1)." "$(warnings)"
+takes_comments; touch "$S/live_site"; pub; served; rm "$S/live_site"
+sed 's#<p>Hello</p>#<p>Hello, and welcome</p>#' "$c/site/hello/index.html" > "$S/live/hello/index.html"
+echo '<p>changed</p>' >> "$S/fixture/index.html"; pub; t="the live page's words differ, its scripts and form don't (a host that rewrites markup)"
+check "$t: live, with no warning: only what can read a comment is compared" "0|live|[]" "$code|$(js state)|$(warnings)"
+
+takes_comments; touch "$S/live_site"; pub; rm "$S/live_site"; echo 7 > "$S/live_exit"
+echo '<p>changed</p>' >> "$S/fixture/index.html"; pub; t="the live site can't be reached at all for the check"
+check "$t: live" "0|live" "$code|$(js state)"
+contains "$t: a warning that nothing could be checked" "Warning: the live site's comment form couldn't be checked (www.example.com couldn't be reached for /hello/index.html; see var/publish.log); the next publish checks it." "$(warnings)"
+lacks_text "$t: not called a change: nothing was seen" "$(warnings)" "Action needed"
+
+newcase; adapter x <<'A'
+ADAPTER_PIGEONHOLE=1
+adapter_confirm() { return 0; }
+A
+with_pigeonhole; : > "$S/curl.calls"; pub; t="a site that takes comments, with no page that has a form in this publish"
+check "$t: live, no warning, and nothing asked of the live site for it" "0|live|[]|0" "$code|$(js state)|$(warnings)|$(grep -c '?p=' "$S/curl.calls")"
+newcase; adapter x <<'A'
+adapter_confirm() { return 0; }
+A
+: > "$S/curl.calls"; pub; t="a site with no pigeonhole"
+check "$t: nothing asked of the live site for it" "0|0" "$code|$(grep -c '?p=' "$S/curl.calls")"
 
 # An adapter that deploys again: its deploy notes each commit it is given, fails while deploy_fails is there, and makes
 # the live site serve the publish (live) unless never_live is there; its confirm answers 0 once live, else 2 while away

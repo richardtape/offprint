@@ -341,6 +341,7 @@ check "for the offprint_request action"          contains "$BAR" 'name="action" 
 check "with a nonce field of its own"                  contains "$BAR" 'name="offprint_nonce"'
 check "not a second _wpnonce on the screen"            lacks "$BAR" '_wpnonce'
 check "a user who can't publish gets no node"          equals "$(publish_php bar --user=e2e-contrib)" "no node"
+check "a site with no pigeonhole: nothing about comments in the node" lacks "$BAR" "omments"
 for state in exporting checking pushing deploying; do
   status_is "$state" true 5 "Working on it"
   BAR=$(bar)
@@ -866,6 +867,69 @@ run_export forms-users
 check "comment forms: users only: the export succeeds"         equals "$EXPORT_STATUS" 0
 check "comment forms: users only: no form, no block, no link to the login page" sh -c "! grep -rq '/_pigeonhole\|offprint-pigeonhole\|wp-login' '$E2E_EXPORT/forms-users/takes-comments/index.html'"
 wp option update comment_registration 0 >/dev/null
+
+# --- the admin bar, for a site that takes comments ---------------------------------------------------------------
+# How many comments the Mac has fetched and not opened, when, and how the last check went (from two small files the
+# Mac writes in var/: here the test writes them), and the "Check for comments" button, which writes a collect request
+# into the inbox and asks for no publish.
+CREQ="$E2E_INBOX/collect-request"; FETCHED="$E2E_PUBLISH/pigeonhole-fetch.json"; COLLECTED="$E2E_PUBLISH/pigeonhole.json"
+rm -f "$REQ" "$CREQ" "$FETCHED" "$COLLECTED"; fresh
+wp user create e2e-author e2e-author@example.com --role=author --user_pass="$ADMIN_PASSWORD" >/dev/null 2>&1
+BAR=$(bar)
+check "comments in the admin bar: no PHP notices"             lacks "$BAR" "php:"
+check "comments in the admin bar: nothing fetched yet: none wait" equals "$(field comments "$BAR" | head -1)" "Comments: none waiting to be checked."
+check "comments in the admin bar: ... and it says the agent fetches" contains "$(field comments "$BAR")" "Nothing has been fetched yet. The Mac's agent fetches every five minutes (offprint install-agent)."
+check "comments in the admin bar: ... nothing beside the title" equals "$(field count "$BAR")" ""
+check "comments in the admin bar: the Check for comments button" equals "$(field collect "$BAR")" "Check for comments"
+check "comments in the admin bar: ... posts to admin-post.php, for its own action" contains "$BAR" 'name="action" value="offprint_collect"'
+check "comments in the admin bar: ... the Publish Site button is still there" equals "$(field button "$BAR")" "Publish Site"
+check "comments in the admin bar: a user who can publish but not moderate sees the node, and nothing about comments" \
+  sh -c 'printf "%s" "$1" | grep -q "^button: Publish Site" && ! printf "%s" "$1" | grep -q "omments"' _ "$(publish_php bar --user=e2e-author)"
+check "comments in the admin bar: a user who can't publish gets no node" equals "$(publish_php bar --user=e2e-contrib)" "no node"
+NOW=$(date +%s)
+printf '{"fetched_at":%s,"ok":true,"fetched":3,"damaged":0,"left":0,"waiting":3,"reason":""}\n' "$((NOW - 60))" > "$FETCHED"; chmod a+r "$FETCHED"
+BAR=$(bar)
+check "comments in the admin bar: three fetched: said under the node" equals "$(field comments "$BAR" | head -1)" "Comments: 3 have arrived on the Mac and wait to be checked."
+check "comments in the admin bar: ... and beside the title"    contains "$(field count "$BAR")" "3 comments to check"
+check "comments in the admin bar: ... with when they were fetched" contains "$(field comments "$BAR" | sed -n 2p)" "Last fetched at "
+printf '{"collected_at":%s,"imported":2,"spam":1,"already":0,"canaries":0,"rejected":0,"damaged":0,"failed":0,"waiting":0}\n' "$((NOW - 10))" > "$COLLECTED"; chmod a+r "$COLLECTED"
+BAR=$(bar)
+check "comments in the admin bar: after a collection: none wait" equals "$(field comments "$BAR" | head -1)" "Comments: none waiting to be checked."
+check "comments in the admin bar: ... and how it went"         contains "$(field comments "$BAR" | sed -n 3p)" ": 2 are in the moderation queue; 1 went to spam."
+printf '{"fetched_at":%s,"ok":false,"fetched":0,"damaged":0,"left":0,"waiting":"<img src=x onerror=alert(1)>","reason":"<script>alert(1)</script>"}\n' "$NOW" > "$FETCHED"
+BAR=$(bar)
+check "comments in the admin bar: a fetch file with markup in it is not believed" contains "$(field comments "$BAR")" "couldn't be read; the next fetch writes it again."
+check "comments in the admin bar: ... and none of it reaches the page" sh -c '! printf "%s" "$1" | grep -q "<img\|<script>alert\|onerror"' _ "$BAR"
+printf '{"fetched_at":%s,"ok":false,"fetched":0,"damaged":0,"left":0,"waiting":1,"reason":"unreachable"}\n' "$NOW" > "$FETCHED"
+BAR=$(bar)
+check "comments in the admin bar: a fetch that failed says why, and what to run" contains "$(field comments "$BAR")" "failed: the pigeonhole's server couldn't be reached. On the Mac: offprint pigeonhole doctor."
+# The button, through the web.
+ADMIN_AUTH=$(publish_php auth e2e-admin); ADMIN_COOKIE=$(echo "$ADMIN_AUTH" | sed -n 1p); ADMIN_STATUS=$(echo "$ADMIN_AUTH" | sed -n 3p); ADMIN_COLLECT=$(echo "$ADMIN_AUTH" | sed -n 5p)
+AUTHOR_AUTH=$(publish_php auth e2e-author); AUTHOR_COOKIE=$(echo "$AUTHOR_AUTH" | sed -n 1p); AUTHOR_COLLECT=$(echo "$AUTHOR_AUTH" | sed -n 5p)
+check "Check for comments: refuses a wrong nonce" \
+  equals "$(fetch_with "" "$POST" -H "$ADMIN_COOKIE" --data "action=offprint_collect&offprint_nonce=wrong" -o /dev/null -w '%{http_code}')" 403
+check "Check for comments: ... which asks nothing"             test ! -e "$CREQ"
+check "Check for comments: refuses the Publish Site button's nonce" \
+  equals "$(fetch_with "" "$POST" -H "$ADMIN_COOKIE" --data "action=offprint_collect&offprint_nonce=$ADMIN_ASK" -o /dev/null -w '%{http_code}')" 403
+check "Check for comments: refuses a user who may not moderate comments" \
+  equals "$(fetch_with "" "$POST" -H "$AUTHOR_COOKIE" --data "action=offprint_collect&offprint_nonce=$AUTHOR_COLLECT" -o /dev/null -w '%{http_code}')" 403
+check "Check for comments: ... which asks nothing either"      test ! -e "$CREQ"
+check "Check for comments: refuses a logged-out request"       test "$(fetch_with "" "$POST" --data "action=offprint_collect&offprint_nonce=$ADMIN_COLLECT" -o /dev/null -w '%{http_code}')" != 302
+check "Check for comments: ... which asks nothing either"      test ! -e "$CREQ"
+check "Check for comments: asks, then goes back to the page it was on" \
+  equals "$(fetch_with "" "$POST" -H "$ADMIN_COOKIE" -H "Referer: https://$LOCAL/wp-admin/edit-comments.php" \
+    --data "action=offprint_collect&offprint_nonce=$ADMIN_COLLECT" -o /dev/null -w '%{http_code} %{redirect_url}')" "302 https://$LOCAL/wp-admin/edit-comments.php"
+check "Check for comments: the request is one line: a time, and that the button asked" sh -c "grep -Eqx '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z button' '$CREQ'"
+check "Check for comments: nothing else is left in the inbox"  equals "$(ls -A "$E2E_INBOX")" "collect-request"
+check "Check for comments: it asks for no publish"             not_asked
+BAR=$(bar)
+check "comments in the admin bar: while the request waits: checking" equals "$(field comments "$BAR" | head -1)" "Comments: checking…"
+JSON=$(fetch_with "" "$AJAX&nonce=$ADMIN_STATUS" -H "$ADMIN_COOKIE")
+check "status action: has the comments part, as text"         equals "$(php -r '$j = json_decode( stream_get_contents( STDIN ), true ); echo $j["data"]["comments"]["lines"][0] ?? "", "|", var_export( $j["data"]["comments"]["pending"] ?? null, true ), "|", var_export( $j["data"]["poll"] ?? null, true );' <<<"$JSON")" "Comments: checking…|true|true"
+check "status action: a user who may not moderate gets no comments part" \
+  equals "$(fetch_with "" "$AJAX&nonce=$(echo "$AUTHOR_AUTH" | sed -n 3p)" -H "$AUTHOR_COOKIE" | php -r '$j = json_decode( stream_get_contents( STDIN ), true ); echo isset( $j["data"]["title"] ) && ! isset( $j["data"]["comments"] ) ? "none" : "some";')" none
+check "export mode with a cookie: nothing about comments, and no button" lacks "$(fetch / -H "$ADMIN_COOKIE")" "offprint_collect"
+rm -f "$CREQ" "$FETCHED" "$COLLECTED"
 
 # --- summary ------------------------------------------------------------------------------------
 echo "$PASSED passed, $FAILED failed"

@@ -1,0 +1,10 @@
+# The rehearsal's web server: one static site, and whatever lines offprint pigeonhole print-server web printed for
+# it (site-extra.caddy, written by tests/rehearsal.sh), inside the site's own block, as the owner's platform puts them.
+{
+	auto_https off
+}
+:80 {
+	root * /srv
+	import /etc/caddy/site-extra.caddy
+	file_server
+}

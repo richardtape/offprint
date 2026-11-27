@@ -27,6 +27,8 @@ final class Request
     /** The inbox. A OFFPRINT_INBOX constant (in wp-config.php) overrides it. */
     public const INBOX = '/var/www/publish-inbox';
     public const FILE = 'publish-request';
+    /** Asking the Mac to check for comments: the same folder, another name (bin/publish-agent takes both). */
+    public const COLLECT_FILE = 'collect-request';
     /** When a request couldn't be written, and why, until one can. Not autoloaded. */
     private const FAILURE_OPTION = 'offprint_request_failure';
 
@@ -72,6 +74,18 @@ final class Request
          * @param string $reason Why, as the request file says it.
          */
         do_action('offprint_requested', $reason);
+    }
+
+    /**
+     * Asks the Mac to check for comments (to open what it has fetched from the site's pigeonhole, and hand it to
+     * WordPress, held): writes the collect request, one line, as request() writes its own. Returns '' when it is
+     * written, or why it could not be. It asks for no publish, and nothing is remembered of a failure: the admin bar's
+     * button is the only thing that asks, and whoever pressed it is told at once.
+     */
+    public static function collect(): string
+    {
+        $problem = self::problem();
+        return $problem !== '' ? $problem : self::write(self::inbox(), gmdate('Y-m-d\TH:i:s\Z') . " button\n", self::COLLECT_FILE);
     }
 
     public static function inbox(): string
@@ -163,15 +177,15 @@ final class Request
     }
 
     /** Writes beside the request file, then renames, so the Mac never reads half a line. '' or what went wrong. */
-    private static function write(string $inbox, string $line): string
+    private static function write(string $inbox, string $line, string $file = self::FILE): string
     {
-        $temp = $inbox . '/.' . self::FILE . '.' . bin2hex(random_bytes(6));
+        $temp = $inbox . '/.' . $file . '.' . bin2hex(random_bytes(6));
         // The Mac takes the request from this folder at any moment: a failure is reported, not warned about.
         if (@file_put_contents($temp, $line) !== strlen($line)) {
             @unlink($temp);
             return "WordPress couldn't write a file in $inbox, the folder it asks the Mac through.";
         }
-        if (!@rename($temp, $inbox . '/' . self::FILE)) {
+        if (!@rename($temp, $inbox . '/' . $file)) {
             @unlink($temp);
             return "WordPress couldn't put the request file in place in $inbox.";
         }

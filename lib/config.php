@@ -6,7 +6,8 @@
  *
  * Exit 0: the ten SITE_* lines on stdout (the keys lib/site.sh reads), then, for a site.json with a
  * "backup" block, SITE_BACKUP_RECIPIENTS and SITE_BACKUP_TO, then, for one with a "pigeonhole" block,
- * SITE_PIGEONHOLE_PATH and SITE_PIGEONHOLE_RECIPIENTS, then ADAPTER_NAME and one
+ * SITE_PIGEONHOLE_PATH and SITE_PIGEONHOLE_RECIPIENTS (and, when the block names its server, the seven
+ * SITE_PIGEONHOLE_SERVER... , ..._JUMP... and SITE_PIGEONHOLE_STORE_PORT lines), then ADAPTER_NAME and one
  * ADAPTER_SET_<KEY> line per adapter setting, nothing on stderr.
  * Exit 2: nothing on stdout; one line per problem on stderr, each starting `site.json: "<field>"`.
  *
@@ -27,6 +28,14 @@ const KNOWN = [
 const BLOCKS = ['adapter', 'backup', 'pigeonhole'];
 /** An age X25519 public key: age1 and 58 characters of the encoding's alphabet. Public, so it may be shown. */
 const AGE_RECIPIENT = '/\Aage1[ac-hj-np-z02-9]{58}\z/D';
+/**
+ * A machine's ssh host key, as its public key file has it without the comment: an Ed25519 key, the only kind taken.
+ * (The 51 bytes of such a key are always 68 characters, the first 25 the same for every one.)
+ */
+const SSH_HOST_KEY = '/\Assh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+\/]{43}\z/D';
+/** The pigeonhole block's fields, and those of them that say where its server is (all four, or none). */
+const PIGEONHOLE_FIELDS = ['path', 'recipients', 'server', 'server_host_key', 'server_port', 'jump', 'jump_host_key', 'jump_port', 'store_port'];
+const PIGEONHOLE_SERVER_FIELDS = ['server', 'server_host_key', 'jump', 'jump_host_key'];
 const ADAPTER_MAX_SETTINGS = 20;
 
 function fail_usage(): never
@@ -118,6 +127,24 @@ function valid_host(string $h): bool
         }
     }
     return true;
+}
+
+/**
+ * Whether this is one machine's address, written the one way it is written: IPv4 as four numbers with no leading
+ * zeros, IPv6 in its canonical form, and never a name (a name is looked up when it is used, and the answer is whoever
+ * answers), a zone, a port or a bracket.
+ */
+function valid_address(mixed $a): bool
+{
+    if (!is_string($a) || strlen($a) > 45 || preg_match('/\A[0-9a-f:.]+\z/D', $a) !== 1) {
+        return false;
+    }
+    if (filter_var($a, FILTER_VALIDATE_IP) === false) {
+        return false;
+    }
+    $packed = inet_pton($a);
+    // (an IPv4 address written inside an IPv6 one is two ways to write one machine: not taken)
+    return $packed !== false && inet_ntop($packed) === $a && !str_contains($a, '.') === (strlen($packed) === 16);
 }
 
 if ($argc !== 2 || !is_dir($argv[1])) {
@@ -353,8 +380,15 @@ if (array_key_exists('backup', $data)) {
 // lines, and nothing about comments anywhere. The path is one name, so it can't reach into another folder of the
 // site, hold a query or be another origin. As for the backup, a value that is not a public key is never repeated in
 // the message; here the keys are also printed into the public pages, so a private one must never pass.
+// Where its server is, for the Mac's fetch, is four more fields, all or none: "server" (the store's address on the
+// private network) and "server_host_key", "jump" (the web server's own address, through which the store is reached:
+// never the site's public name, which may be a proxy's that carries no ssh) and "jump_host_key". Each host key is the
+// machine's own ssh key, pinned here: a fetch never learns one. And three optional ports: "server_port" and
+// "jump_port" (ssh's, 22 unless given) and "store_port" (the one the store listens on for the web server, 8788).
+// Without the four, comments can be collected from the spool but nothing fetches into it.
 $pigeonholePath = null;
 $pigeonholeRecipients = null;
+$pigeonholeServer = null;
 if (array_key_exists('pigeonhole', $data)) {
     $raw = $raw ?? json_decode($text, false, MAX_DEPTH);   // objects stay objects, so {} and [] differ
     $p = $data['pigeonhole'];
@@ -362,7 +396,7 @@ if (array_key_exists('pigeonhole', $data)) {
         $problems[] = 'site.json: "pigeonhole" must be an object with "path" and "recipients".';
     } else {
         foreach (array_keys($p) as $k) {
-            if (!in_array((string) $k, ['path', 'recipients'], true)) {
+            if (!in_array((string) $k, PIGEONHOLE_FIELDS, true)) {
                 $problems[] = 'site.json: "pigeonhole.' . show((string) $k) . '" is not a known field.';
             }
         }
@@ -391,6 +425,56 @@ if (array_key_exists('pigeonhole', $data)) {
                 $problems[] = 'site.json: "pigeonhole.recipients" names the same key twice.';
             } else {
                 $pigeonholeRecipients = implode(' ', $keys);
+            }
+        }
+        $named = array_values(array_filter(PIGEONHOLE_SERVER_FIELDS, static fn (string $f): bool => array_key_exists($f, $p)));
+        $phPorts = ['server_port' => 22, 'jump_port' => 22, 'store_port' => 8788];
+        $good = true;
+        foreach ($phPorts as $f => $default) {
+            if (!array_key_exists($f, $p)) {
+                continue;
+            }
+            $least = $f === 'store_port' ? 1024 : 1;
+            if (!is_int($p[$f]) || $p[$f] < $least || $p[$f] > 65535) {
+                $problems[] = "site.json: \"pigeonhole.$f\" must be a JSON integer from $least to 65535.";
+                $good = false;
+            } elseif ($named === []) {
+                $problems[] = "site.json: \"pigeonhole.$f\" is given, but the block names no server (\"server\", \"server_host_key\", \"jump\" and \"jump_host_key\").";
+                $good = false;
+            } else {
+                $phPorts[$f] = $p[$f];
+            }
+        }
+        if ($named !== []) {
+            foreach (PIGEONHOLE_SERVER_FIELDS as $f) {
+                if (!array_key_exists($f, $p)) {
+                    $problems[] = "site.json: \"pigeonhole.$f\" is required when the block names its server (\"server\", \"server_host_key\", \"jump\" and \"jump_host_key\" go together).";
+                    $good = false;
+                } elseif (str_ends_with($f, '_host_key')) {
+                    // (never repeated: a private key pasted here by mistake must not reach a message)
+                    if (!is_string($p[$f]) || preg_match(SSH_HOST_KEY, $p[$f]) !== 1) {
+                        $problems[] = "site.json: \"pigeonhole.$f\" must be that machine's Ed25519 host key, as ssh-ed25519, a space and its 68 characters, with nothing after them.";
+                        $good = false;
+                    }
+                } elseif (!valid_address($p[$f])) {
+                    $problems[] = "site.json: \"pigeonhole.$f\" must be an address (IPv4 like 10.0.0.5, or IPv6 in its shortest lowercase form), not a name.";
+                    $good = false;
+                }
+            }
+            if ($good && $p['server'] === $p['jump'] && $phPorts['server_port'] === $phPorts['jump_port']) {
+                $problems[] = 'site.json: "pigeonhole.jump" must be another machine than "pigeonhole.server": the store is reached through the web server.';
+                $good = false;
+            }
+            if ($good) {
+                $pigeonholeServer = [
+                    'SITE_PIGEONHOLE_SERVER' => $p['server'],
+                    'SITE_PIGEONHOLE_SERVER_PORT' => $phPorts['server_port'],
+                    'SITE_PIGEONHOLE_SERVER_HOST_KEY' => $p['server_host_key'],
+                    'SITE_PIGEONHOLE_JUMP' => $p['jump'],
+                    'SITE_PIGEONHOLE_JUMP_PORT' => $phPorts['jump_port'],
+                    'SITE_PIGEONHOLE_JUMP_HOST_KEY' => $p['jump_host_key'],
+                    'SITE_PIGEONHOLE_STORE_PORT' => $phPorts['store_port'],
+                ];
             }
         }
     }
@@ -423,6 +507,9 @@ if ($backupRecipients !== null) {
 if ($pigeonholePath !== null && $pigeonholeRecipients !== null) {
     echo "SITE_PIGEONHOLE_PATH\t", $pigeonholePath, "\n";
     echo "SITE_PIGEONHOLE_RECIPIENTS\t", $pigeonholeRecipients, "\n";
+    foreach ($pigeonholeServer ?? [] as $k => $v) {
+        echo $k, "\t", $v, "\n";
+    }
 }
 echo "ADAPTER_NAME\t", $adapterName, "\n";
 foreach ($adapterSettings as $k => $v) {

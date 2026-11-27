@@ -26,7 +26,7 @@ starting `site.json: "<field>"`.
 | `agent_label` | no | Letters, digits, dots and dashes, starting with a letter or digit, at most 100 characters. | `local.offprint.NAME.publish` |
 | `daemon_prefix` | no | The same rule as `agent_label`. | `local.offprint.NAME` |
 | `backup` | no, but a publish refuses without it | Who the database backup is encrypted to: an object, `{"recipients": ["age1…"]}`, with one or two age public keys (each `age1` and 58 more characters), not the same one twice. Its only other key is `"to"`, where the backup is sent: `"repo"` (the site's own repository) is the one place there is. | none |
-| `pigeonhole` | no | Comments (not finished: see [Comments](#comments-pigeonhole-what-is-built)): an object, `{"path": "/_pigeonhole", "recipients": ["age1…"]}`. `path` is a slash and one name of 1 to 40 lowercase letters, digits, dashes and underscores; `recipients` is one or two age public keys, not the same one twice. | none |
+| `pigeonhole` | no | Comments (see [Comments](#comments-pigeonhole-what-is-built)): an object, `{"path": "/_pigeonhole", "recipients": ["age1…"]}`. `path` is a slash and one name of 1 to 40 lowercase letters, digits, dashes and underscores; `recipients` is one or two age public keys, not the same one twice. Where its server is, for the fetch, is four more members, all or none: `server` (the store's address on the private network) and `server_host_key`, `jump` (the web server's own address, never the site's public name) and `jump_host_key`. An address is IPv4, or IPv6 in its shortest lowercase form, never a name; a host key is that machine's Ed25519 ssh host key, as `ssh-ed25519`, a space and its 68 characters. Optional with them: `server_port` and `jump_port` (ssh's, 22) and `store_port` (the store's own, 8788; 1024 or above). | none |
 | `adapter` | no | The site's host adapter: an object, `{"name": "NAME", ...}`. NAME is lowercase letters, digits and dashes, starting with a letter, at most 41 characters: an adapter in the tool's `adapters/`, or else in the site folder's own `adapters/`, committed. Its other keys are the adapter's settings, at most 20, each named with lowercase letters, digits and underscores, starting with a letter, at most 41 characters, and each a string of 1 to 200 letters, digits and `. _ : / @ + = -`, or an integer from 0 to 2147483647; the adapter checks them itself. | `{"name": "none"}` |
 
 A hostname is at most 253 characters, each label at most 63. An example:
@@ -147,9 +147,17 @@ usage: offprint COMMAND [ARGS...]
   offprint backup restore [--from FILE] [--unchecked] [--yes]
                                              replace the local database with the committed backup's (or a dump
                                              file's), keeping an encrypted copy of the one it replaces
-  offprint collect                           take the comments waiting in the site's pigeonhole spool into WordPress,
-                                             held for moderation (needs a pigeonhole block in site.json; nothing
-                                             fetches comments into the spool yet)
+  offprint collect [--no-fetch | --fetch-only [--notify]]
+                                             fetch what the site's pigeonhole holds, and take it into WordPress,
+                                             held for moderation (--fetch-only: fetch, and open nothing; needs a
+                                             pigeonhole block in site.json)
+  offprint pigeonhole keys                   make the site's two comment keys in the login Keychain (the daily key
+                                             and the pull key), and print their public halves
+  offprint pigeonhole print-server web | store WEB_ADDRESS
+                                             print what you do on the web server, or the script you run on the
+                                             store's machine (Offprint runs neither)
+  offprint pigeonhole doctor                 check the whole path a comment travels, with a test submission: one ok
+                                             or problem line each (exit 0 only when all are ok)
   offprint adapter setup [--yes]             set up on this Mac what the site's host adapter needs (each step says
                                              what it will do, and asks first; --yes: yes to each)
   offprint adapter doctor                    check what the site's host adapter needs, and the live site: one ok or
@@ -279,23 +287,70 @@ refuses until you do, and says the command. Pinning a site to an exact Offprint 
 
 ## Comments (Pigeonhole): what is built
 
-Pigeonhole is how a static Offprint site will take comments: a visitor's browser encrypts a comment to a key only
-you hold, it waits in a store nobody on the internet can reach, your Mac fetches and opens it, and it lands in
-WordPress's own moderation queue. **It is not finished, and no site can take a comment yet.** Built today are the
-Mac's side and the page's side, and nothing between them:
+Pigeonhole is how a static Offprint site takes comments. A visitor's browser encrypts a comment to keys only you
+hold and posts it to one path of the site's own address; your web server passes it to a store on a private network,
+which nothing on the internet can reach; your Mac fetches it over ssh, and, when you ask, opens it and hands it to
+WordPress, where it waits in the moderation queue. An approved comment shows at the next publish.
 
-- The `pigeonhole` block in `site.json` (above). Without it nothing about comments happens anywhere.
-- `offprint collect`. For each file waiting in the site's spool it checks the file is what was sent (its name is the
-  hash of its bytes), opens it with the site's daily key from the login Keychain, checks that what it holds is a
-  comment and nothing else, sorts it (held, or spam when a hidden field was filled in or it was sent within 3
-  seconds), and hands it to WordPress. It ends with one `ok:` or `problem:` line.
-- The import in WordPress. Every comment is held, whatever WordPress's settings would allow; its HTML is filtered;
-  a link keeps its address only when it is a whole `http(s)` one to another site, and an address of this site's own
-  in the comment's words becomes "[a link to this site]" (a link to a page of yours that isn't there would fail
-  every publish; put a real link back when you moderate, if you want it); the same comment arriving twice is one
-  comment; and no email is sent about it. It is imported with the site's plugins and theme loaded, so a
-  post of a type one of them registers takes comments like any other; a plugin of yours that acts on new comments
-  (one that sends them to a spam service, say) is handed these too.
+**Every part is built, and the whole has been run with the real programs in Docker
+(`tests/rehearsal.sh`: Caddy, sshd, the store, the fetch, a real WordPress). It has not yet run on a real server.**
+It needs a web server of your own in front of the site (one that can pass a path on) and a second, small machine on
+a private network with it; a host that only takes files can't take comments, and neither built-in adapter says it
+can. Nothing here is "end-to-end encrypted": a comment is encrypted in the visitor's browser to a key only the
+site's owner holds, by a script the site's own web server sends them.
+
+### What you set up, in order
+
+1. **The keys.** `offprint pigeonhole keys` makes two in the login Keychain, each only if it isn't there, and
+   prints the public half of each. The *daily key* opens comments (an age key; `age-keygen` makes it, straight into
+   the Keychain). The *pull key* fetches (an ssh key for this site alone). Neither is ever shown or written to a
+   file. Make a second age key somewhere else, the *recovery key*, and keep it off this Mac: a comment encrypted
+   to the daily key alone is lost with this Mac.
+2. **`site.json`.** The `pigeonhole` block: `path`, `recipients` (the daily key's public half, then the recovery
+   key's), and the four server members (`server`, `server_host_key`, `jump`, `jump_host_key`). Each host key is the
+   first two words of that machine's `/etc/ssh/ssh_host_ed25519_key.pub`; they are pinned in `site.json`, and a
+   machine that shows another key is never spoken to.
+3. **The store's machine.** `offprint pigeonhole print-server store WEB_ADDRESS` prints a script (WEB_ADDRESS is
+   the web server's address on the private network). Read it, then run it as root on the store's machine (Debian
+   12 or Ubuntu 24.04: node 18 or newer, from the system's packages). It makes a user for this site
+   (`ph-NAME`), the store as a systemd unit shut in to its own folder and to speaking with the web server alone, and
+   the one thing the pull key may do there, and only from the web server's address (list, fetch and remove this
+   site's submissions: no shell). It ends by
+   printing the firewall lines, which are yours to run: only the web server may reach that machine.
+4. **The web server.** `offprint pigeonhole print-server web` prints the lines for the site's Caddy block (`POST` to
+   exactly the path is passed to the store, with the whole request taken first and the visitor's address set by
+   Caddy itself) and the commands for the user the Mac's ssh passes through (`pigeonhole-jump`, whose key may only
+   open a connection on to the store's ssh: its key's line says so, and a rule for that user in
+   `/etc/ssh/sshd_config.d/` forbids what a key's line can't).
+5. **The adapter.** The site's own adapter says its host passes the path on: `ADAPTER_PIGEONHOLE=1`
+   ([A site's own adapter](#a-sites-own-adapter)). A publish refuses a site with the block until it does.
+6. **`offprint compose up -d`** (WordPress takes the path and keys when its container is made), then
+   **`offprint pigeonhole doctor`**: one `ok:` or `problem:` line for each step of the path, ending with a test
+   submission posted through the public site, fetched back, and opened. Then publish.
+
+Offprint runs none of steps 3 and 4, never runs `sudo`, and never touches a server.
+
+### Day to day
+
+- **Fetching** happens by itself: the site's agent (`offprint install-agent`) fetches when it wakes, about every
+  five minutes, and opens nothing. A server that doesn't answer is cut off after a minute. A fetch reads the pull key and never the daily key. When it brings anything,
+  one macOS notification says how many wait, and nothing else.
+- **Opening** happens when you ask: "Check for comments" in WordPress's admin bar, or `offprint collect` (which
+  fetches first; `--no-fetch` opens only what is here already). The admin bar says how many wait, when the last
+  fetch was and whether it worked, and how the last check went.
+- **Moderating** is WordPress's own comments screen. Approving a comment publishes nothing: it shows at the next
+  publish, for whatever reason that runs.
+
+`offprint collect`, for each file in the site's spool: checks the file is what was sent (its name is the hash of
+its bytes), opens it with the daily key, checks that what it holds is a comment and nothing else, sorts it (held, or
+spam when a hidden field was filled in or it was sent within 3 seconds), and hands it to WordPress. It ends with
+one `ok:` or `problem:` line. The import holds every comment, whatever WordPress's settings would allow; filters
+its HTML; keeps a link's address only when it is a whole `http(s)` one to another site, and replaces an address of
+this site's own in the comment's words with "[a link to this site]" (a link to a page of yours that isn't there
+would fail every publish; put a real link back when you moderate, if you want it); takes the same comment arriving
+twice as one; and sends no email about it. It runs with the site's plugins and theme loaded, so a post of a type one
+of them registers takes comments like any other; a plugin of yours that acts on new comments (one that sends them
+to a spam service, say) is handed these too.
 
 The spool is `~/Library/Application Support/Offprint/pigeonhole/NAME/spool/` (`OFFPRINT_HOME` moves
 `~/Library/Application Support/Offprint`), never in the site folder. Beside it, `done/` holds what WordPress took
@@ -303,34 +358,55 @@ The spool is `~/Library/Application Support/Offprint/pigeonhole/NAME/spool/` (`O
 Nothing is ever dropped. A comment WordPress doesn't answer for stays in the spool and the run goes on to the next;
 after two such in a row the run stops, and the next run tries again.
 
-On the page, for a site with the block (WordPress takes it when its container is made, so after adding or changing
-it run `offprint compose up -d`):
+### The parts
 
-- A post with comments open shows WordPress's own comment form, with a block naming the path and the keys, and a
-  loader of under 1 KB. The form cannot post by itself (its method is `dialog`, which a browser does nothing with):
-  only the script sends, and only what it has encrypted, so a visitor whose browser never ran the script sends
-  nothing. A post with comments closed, and every other page,
-  is as before. A site that takes comments from its registered users only shows no form.
-- The first time a visitor touches the form, the loader fetches the script that does the work (about 52 KB
-  compressed). On Post Comment it pads the comment to one fixed size, encrypts it in the browser to your keys, does a
-  short proof of work, and posts it to `path` on the site's own origin. Nothing readable leaves the page, and the
-  visitor is told whether it was sent, or what to put right first.
-- Reply links stay on the page: WordPress's own reply script moves the form under the comment. Avatars are off.
-- `bin/check-site` refuses the export when a page's block is not exactly `site.json`'s path and keys; when the
-  comment form is not exactly as printed (once, with the block, unable to post); when anything else on a page would
-  send to the path, however its address is written; or when either script is not byte for byte the tool's own.
+**The page.** For a site with the block, a post with comments open shows WordPress's own comment form, with a block
+naming the path and the keys, and a loader of under 1 KB. The form cannot post by itself (its method is `dialog`,
+which a browser does nothing with): only the script sends, and only what it has encrypted, so a visitor whose
+browser never ran the script sends nothing. A post with comments closed, and every other page, is as before. A
+site that takes comments from its registered users only shows no form. The first time a visitor touches the form,
+the loader fetches the script that does the work (about 52 KB compressed). On Post Comment it pads the comment to
+one fixed size, encrypts it in the browser to your keys, does a short proof of work, and posts it to `path` on the
+site's own origin. Nothing readable leaves the page, and the visitor is told whether it was sent, or what to put
+right first. Reply links stay on the page: WordPress's own reply script moves the form under the comment. Avatars
+are off. `bin/check-site` refuses the export when a page's block is not exactly `site.json`'s path and keys; when
+the comment form is not exactly as printed (once, with the block, unable to post); when anything else on a page
+would send to the path, however its address is written; or when either script is not byte for byte the tool's own.
 
-A comment form is only any use on a host that forwards `path` to the site's pigeonhole, so a publish refuses a
-site with the block unless its adapter says its host does (`ADAPTER_PIGEONHOLE=1`: see
-[A site's own adapter](#a-sites-own-adapter)). Neither built-in adapter does.
+**The store** (`pigeonhole/server/store.js`: one small node program, no dependencies). It takes a `POST` to the one
+path and nothing else. It refuses anything that is not exactly the size a submission has, does not start as an age
+file does, or carries no proof of work; it lets one sender (an IPv4 address, or a /64 of IPv6) send 10 an hour and
+everyone 300; and it keeps each submission once, whole or not at all, in a file named after its hash. It cannot
+list or give back what it holds, and it writes down no address. `pigeonhole/server/pull.js` is the one command the
+Mac's key may run beside it: the names held, one file's bytes, one file removed.
 
-The store itself is built too (`pigeonhole/server/store.js`: one small node program, no dependencies), and has
-only run in its tests. It takes a `POST` to the one path and nothing else. It refuses anything that is not exactly
-the size a submission has, does not start as an age file does, or carries no proof of work; it lets one sender (an
-IPv4 address, or a /64 of IPv6) send 10 an hour and everyone 300; and it keeps each submission once, whole or not at
-all, in a file named after its hash. It cannot list or give back what it holds, and it writes down no address.
+**The fetch.** The Mac's ssh goes to the web server, which lets the pull key open one connection, on to the store's
+ssh, where the same key may run the pull command and nothing else. Nothing of your own ssh set-up is used (not
+`~/.ssh/config`, your keys or your agent): the run has a config and a `known_hosts` of its own, holding the two
+pinned host keys, and an `ssh-agent` of its own, into which the pull key goes from the Keychain on a pipe, and
+which is killed when the run ends. Each file is kept only when its bytes hash to its name, and removed from the
+store only once the Mac holds it: a run cut short leaves a comment in both places, never in neither.
 
-Not built: setting the store up on a server, fetching from it, making the keys, and the admin bar's count.
+**After "Live".** Whoever can change a page or a script between your host and a visitor (the host itself, or a
+proxy in front of it) could swap the keys or the script, or add a script that reads a comment as it is typed, and
+read every comment from then on. A publish can't stop that. Once the live site serves the publish, it fetches one
+page that has a comment form, and the two scripts, as any visitor would; gives them the check an export gets; and
+compares the scripts the live page runs with those of the page it published. Anything wrong (an error or a far
+larger answer for one of the three included) is an "Action needed:" warning, and the admin bar turns red; the
+publish stays live, since the files published are right. It is a tripwire, not a proof: it looks at one page, its
+request can be told from a visitor's, and it does not read the bytes of the page's other script files. A proxy
+that adds a script of its own to your pages (an analytics beacon, say) will set it off, rightly: that script can
+read what is typed there.
+
+### Not built, and not yet tried
+
+- Not built: a command that replaces the daily key (add the new one beside the old by hand: `age` tries each);
+  a second site on one store's machine (the server is laid out for it: an instance a site); a trained spam filter;
+  a daily test submission; avatars served from the site; forms other than comments.
+- Not yet tried on a real server: the systemd unit and its limits (written by the printed script; read by
+  `systemd-analyze verify` in the rehearsal, never started there), the firewall lines, and a proxy in front of the
+  web server.
+- The notification is shown by macOS's `osascript`, so macOS says it is from Script Editor.
 
 ## Publishing to Cloudflare Workers
 
@@ -405,6 +481,8 @@ deploys by itself when the site's repository is pushed: `tests/fixtures/adapters
 deploy workflow that writes `build.json`, naming the commit, at the root of the live site. The publish then pushes,
 and waits until the live site names the commit it pushed. An adapter whose host is a web server of yours that forwards
 the pigeonhole's path sets `ADAPTER_PIGEONHOLE=1`; without it a publish refuses a site with a `pigeonhole` block.
+Once such a site is live, the publish also asks the live site for one page with a comment form and for the two
+scripts, and warns loudly when they are not what it published ([Comments](#comments-pigeonhole-what-is-built)).
 
 ## The one privileged step
 
@@ -462,8 +540,11 @@ it. Its last line is the table's row. It needs Docker and the network (the plugi
 | `site.json` loader | `bash tests/config.test.sh` | no | yes |
 | `offprint backup verify` and `restore` | `bash tests/backup.test.sh` | no (stand-in `age` and `docker`) | yes |
 | `offprint collect` | `bash tests/collect.test.sh` | no (stand-in `age`, `docker` and `security`) | yes |
+| The fetch (comments) | `bash tests/fetch.test.sh` | no (stand-in `ssh`, `ssh-agent`, `ssh-add`, `security` and `docker`) | yes |
+| `offprint pigeonhole` | `bash tests/pigeonhole.test.sh` | no (the same stand-ins, and `age-keygen` and `curl`) | yes |
 | The page's scripts (comments) | `node --test tests/pigeonhole-browser.test.js` | no | yes |
 | The store (comments) | `node --test tests/pigeonhole-server.test.js` | no | yes |
+| The store's pull command | `node --test tests/pigeonhole-pull.test.js` | no | yes |
 | Names that must not be in the tool | `bash tests/names.test.sh` | no | yes |
 | End to end | `bash tests/e2e.sh` | yes | no |
 | A plugin that replaces WordPress's sitemaps | `bash tests/compat-seo.sh SLUG` | yes, and the network | no |
@@ -471,9 +552,10 @@ it. Its last line is the table's row. It needs Docker and the network (the plugi
 | A restore, with the real tools | `bash tests/restore-real.sh` | yes, and `age` and `mkcert` | no |
 | `offprint collect`, with the real `age` | `bash tests/collect-real.sh` | no (but `age`, installed) | no |
 | The page's scripts, built again and opened with the real `age` | `bash tests/pigeonhole-real.sh` | no (but `age`, `npm` and the network) | no |
+| Comments, whole, with the real programs | `bash tests/rehearsal.sh` | yes, and `age`, `node` and the network | no |
 | A running site | `bash tests/site.test.sh SITE_DIR` | yes (a set-up site) | no |
 
-The first sixteen need only bash, git, PHP, Perl and Node. The suites that publish use a stand-in `age`
+The first nineteen need only bash, git, PHP, Perl and Node. The suites that publish use a stand-in `age`
 (`tests/fixtures/age-standin`); `tests/backup-real.sh` runs the real one the same ways, and is run on the Mac before a
 change to the backup is merged. `tests/restore-real.sh` makes a real, throwaway site folder (`offprint new`,
 `offprint setup-wp`, a publish with `--no-push`) in the compose project `offprint-restore-real`, restores into it
